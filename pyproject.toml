@@ -1,0 +1,15 @@
+[project]
+name = "mini-pi"
+version = "0.1.0"
+description = "A minimal coding agent inspired by Pi (pi.dev)"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "openai>=1.30",
+    "pydantic>=2.0",
+    "rich>=13.0",
+    "prompt-toolkit>=3.0",
+]
+
+[project.scripts]
+mini-pi = "mini_pi.main:main"
