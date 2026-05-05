@@ -8,6 +8,10 @@ mini-pi 是一个极简的 Python coding agent，已完成：
 - ✅ JSONL session 持久化
 - ✅ 流式输出
 - ✅ OpenAI 兼容 API 支持
+- ✅ **Session Pruning** — 裁剪旧工具结果（11 tests）
+- ✅ **Token 估算** — 字符级 heuristic（14 tests）
+- ✅ **Compaction** — LLM 摘要压缩旧对话（15 tests）
+- ✅ **Skill 框架** — 可发现可扩展的技能系统（19 tests）
 
 ---
 
