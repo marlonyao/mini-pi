@@ -26,6 +26,11 @@ class Config:
     # Session
     session_dir: str = field(default_factory=lambda: os.path.expanduser("~/.mini-pi/sessions"))
 
+    # Skills
+    skill_dirs: list[str] = field(default_factory=lambda: [
+        os.path.expanduser("~/.mini-pi/skills"),
+    ])
+
     # Context management
     pruning: PruningConfig = field(default_factory=PruningConfig)
     compaction: CompactionConfig = field(default_factory=CompactionConfig)

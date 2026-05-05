@@ -21,6 +21,7 @@ from .compactor import Compactor, CompactionConfig
 from .config import Config
 from .context import prune_messages, PruningConfig
 from .session import Session
+from .skills import SkillManager
 from .system_prompt import build_system_prompt
 from .tools import execute_tool, get_openai_tools
 from .token_estimator import TokenEstimator
@@ -40,6 +41,20 @@ class Agent:
 
         self.tools = get_openai_tools()
         self.system_prompt = build_system_prompt(cwd=config.cwd)
+
+        # Skill support
+        self.skill_manager = SkillManager(skill_dirs=config.skill_dirs)
+        self.skill_manager.discover()
+
+        # Add skill tools to the tool list
+        skill_tools = self.skill_manager.get_all_tools()
+        if skill_tools:
+            self.tools.extend(skill_tools)
+
+        # Build system prompt with skill context
+        skill_addition = self.skill_manager.build_skill_prompt_addition()
+        if skill_addition:
+            self.system_prompt += skill_addition
 
         # Compaction support
         self.compactor = Compactor(config.compaction, client=self.client)
