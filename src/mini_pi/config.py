@@ -6,6 +6,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Optional
 
+from .compactor import CompactionConfig
 from .context import PruningConfig
 
 
@@ -27,6 +28,7 @@ class Config:
 
     # Context management
     pruning: PruningConfig = field(default_factory=PruningConfig)
+    compaction: CompactionConfig = field(default_factory=CompactionConfig)
 
     # System prompt
     system_prompt: str = ""

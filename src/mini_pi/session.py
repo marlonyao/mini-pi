@@ -39,6 +39,30 @@ class Session:
                 elif entry.get("type") == "meta":
                     self.created_at = entry.get("created_at", self.created_at)
 
+    def record_compaction(self, result: "CompactResult") -> None:
+        """Record a compaction event in the session.
+
+        This adds a meta entry to the JSONL so we know compaction happened,
+        and replaces older messages with the summary + recent tail.
+        """
+        if not result.success:
+            return
+
+        # Store the summary as a special message
+        summary_msg = {
+            "role": "system",
+            "content": f"[Compaction Summary]\n{result.summary}",
+        }
+
+        # Get recent messages from the result
+        recent = getattr(result, "_recent_messages", [])
+
+        # Replace messages: summary + recent
+        self.messages = [summary_msg] + list(recent)
+
+        # Add compaction meta entry
+        self._compaction_count = getattr(self, "_compaction_count", 0) + 1
+
     def save(self) -> None:
         """Persist session to JSONL file."""
         if not self.path:
@@ -48,11 +72,22 @@ class Session:
         lines: list[str] = []
 
         # Meta entry
-        lines.append(json.dumps({
+        meta = {
             "type": "meta",
             "created_at": self.created_at,
             "saved_at": datetime.now().isoformat(),
-        }))
+        }
+        if hasattr(self, "_compaction_count") and self._compaction_count:
+            meta["compaction_count"] = self._compaction_count
+        lines.append(json.dumps(meta))
+
+        # Compaction entry (if any)
+        if hasattr(self, "_compaction_count") and self._compaction_count:
+            lines.append(json.dumps({
+                "type": "compaction",
+                "count": self._compaction_count,
+                "saved_at": datetime.now().isoformat(),
+            }))
 
         # Message entries
         for msg in self.messages:

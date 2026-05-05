@@ -17,11 +17,13 @@ from typing import Any, Generator
 
 from openai import OpenAI
 
+from .compactor import Compactor, CompactionConfig
 from .config import Config
 from .context import prune_messages, PruningConfig
 from .session import Session
 from .system_prompt import build_system_prompt
 from .tools import execute_tool, get_openai_tools
+from .token_estimator import TokenEstimator
 
 
 class Agent:
@@ -39,6 +41,12 @@ class Agent:
         self.tools = get_openai_tools()
         self.system_prompt = build_system_prompt(cwd=config.cwd)
 
+        # Compaction support
+        self.compactor = Compactor(config.compaction, client=self.client)
+        self.token_estimator = TokenEstimator(
+            max_context_tokens=config.compaction.max_context_tokens,
+        )
+
     def chat(self, user_message: str) -> str:
         """
         Process a user message through the agent loop.
@@ -50,6 +58,9 @@ class Agent:
     def _agent_loop(self) -> str:
         """Run the agent loop until a final text response is produced."""
         for step in range(self.config.max_steps):
+            # Auto-compaction: check if context is approaching limit
+            self._maybe_compact()
+
             text_content, tool_calls, usage = self._stream_llm()
 
             # Track token usage
@@ -229,3 +240,19 @@ class Agent:
                 v_str = v_str[:57] + "..."
             parts.append(f"{k}={v_str!r}")
         return ", ".join(parts)
+
+    def _maybe_compact(self) -> None:
+        """Check if context needs compaction and run it if so."""
+        config = self.config.compaction
+        if not config.enabled:
+            return
+
+        messages = self.session.get_openai_messages()
+        if self.token_estimator.should_compact(messages, threshold=config.threshold):
+            print("\n  🧹 Auto-compacting conversation...")
+            result = self.compactor.compact(messages)
+            if result.success:
+                self.session.record_compaction(result)
+                print(f"     Compacted {result.original_count} → {result.compacted_count} messages")
+            else:
+                print(f"     Compaction skipped: {result.error}")
