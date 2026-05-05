@@ -4,6 +4,9 @@ Configuration for mini-pi coding agent.
 
 import os
 from dataclasses import dataclass, field
+from typing import Optional
+
+from .context import PruningConfig
 
 
 @dataclass
@@ -21,6 +24,9 @@ class Config:
 
     # Session
     session_dir: str = field(default_factory=lambda: os.path.expanduser("~/.mini-pi/sessions"))
+
+    # Context management
+    pruning: PruningConfig = field(default_factory=PruningConfig)
 
     # System prompt
     system_prompt: str = ""

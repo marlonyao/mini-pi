@@ -18,6 +18,7 @@ from typing import Any, Generator
 from openai import OpenAI
 
 from .config import Config
+from .context import prune_messages, PruningConfig
 from .session import Session
 from .system_prompt import build_system_prompt
 from .tools import execute_tool, get_openai_tools
@@ -104,9 +105,13 @@ class Agent:
         Text content is printed to stdout in real-time.
         Tool calls are collected but not printed (we print them when executing).
         """
+        # Prune old tool results to reduce context size
+        raw_messages = self.session.get_openai_messages()
+        pruned = prune_messages(raw_messages, self.config.pruning)
+
         messages = [
             {"role": "system", "content": self.system_prompt},
-            *self.session.get_openai_messages(),
+            *pruned,
         ]
 
         # Try streaming first; fall back to non-stream if provider doesn't support it
@@ -177,9 +182,13 @@ class Agent:
 
     def _call_llm_sync(self) -> tuple[str, list[dict], Any]:
         """Non-streaming fallback for providers that don't support streaming."""
+        # Prune old tool results to reduce context size
+        raw_messages = self.session.get_openai_messages()
+        pruned = prune_messages(raw_messages, self.config.pruning)
+
         messages = [
             {"role": "system", "content": self.system_prompt},
-            *self.session.get_openai_messages(),
+            *pruned,
         ]
 
         response = self.client.chat.completions.create(

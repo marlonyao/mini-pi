@@ -11,5 +11,15 @@ dependencies = [
     "prompt-toolkit>=3.0",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=7.0",
+]
+
 [project.scripts]
 mini-pi = "mini_pi.main:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
