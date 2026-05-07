@@ -22,3 +22,8 @@ Thumbs.db
 
 # Sessions (local data)
 sessions/
+
+# Local secrets
+.env
+.env.*
+!.env.example

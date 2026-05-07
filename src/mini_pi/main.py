@@ -13,12 +13,11 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import TextIO
 
 from rich.console import Console
-from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
-from rich.text import Text
 
 from .agent import Agent
 from .config import Config
@@ -27,35 +26,72 @@ from .session import Session, create_session, list_sessions
 console = Console()
 
 
+def _load_dotenv_files() -> None:
+    """Load ``.env`` from the repository root, then the current working directory (later wins)."""
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    repo_root = Path(__file__).resolve().parents[2]
+    paths: list[Path] = []
+    repo_env = repo_root / ".env"
+    cwd_env = Path.cwd() / ".env"
+    if repo_env.is_file():
+        paths.append(repo_env)
+    if cwd_env.is_file() and (not paths or cwd_env.resolve() != paths[0].resolve()):
+        paths.append(cwd_env)
+    for i, path in enumerate(paths):
+        load_dotenv(path, override=bool(i))
+
+
 class StreamingDisplay:
-    """Collects streamed text and renders it as Markdown in real-time."""
+    """Writes streamed assistant deltas directly to the real terminal.
 
-    def __init__(self):
-        self.parts: list[str] = []
-        self._live: Live | None = None
+    Rich ``Live`` panels render nicely, but in some terminals they only paint their
+    final frame when ``stop()`` runs. Direct writes keep interactive mode genuinely
+    token-streamed, matching ``-p`` mode.
+    """
 
-    def start(self):
+    def __init__(self, output: TextIO) -> None:
+        self.output = output
+        self._saw_reasoning = False
+        self._answer_opened = False
+
+    def start(self) -> None:
         """Start the live display."""
-        self._live = Live(
-            Panel("", title="🤖 Assistant", border_style="green"),
-            console=console,
-            refresh_per_second=8,
-            vertical_overflow="visible",
-        )
-        self._live.start()
+        self._saw_reasoning = False
+        self._answer_opened = False
+        self.output.write("🤖 Assistant\n")
+        self.flush()
 
-    def add(self, text: str):
-        """Add streamed text chunk."""
-        self.parts.append(text)
-        if self._live:
-            full = "".join(self.parts)
-            self._live.update(Panel(Markdown(full), title="🤖 Assistant", border_style="green"))
+    def add(self, text: str) -> None:
+        """Add streamed answer text chunk."""
+        if not text:
+            return
+        if self._saw_reasoning and not self._answer_opened:
+            self.output.write("\n\n")
+            self._answer_opened = True
+        self.output.write(text)
+        self.flush()
 
-    def stop(self):
+    def add_reasoning(self, text: str) -> None:
+        """Add streamed reasoning content chunk (DeepSeek thinking mode)."""
+        if not text:
+            return
+        self._saw_reasoning = True
+        if self.output.isatty():
+            self.output.write(f"\033[2;3m{text}\033[0m")
+        else:
+            self.output.write(text)
+        self.flush()
+
+    def flush(self) -> None:
+        """Force immediate flush of streamed output."""
+        self.output.flush()
+
+    def stop(self) -> None:
         """Stop the live display."""
-        if self._live:
-            self._live.stop()
-            self._live = None
+        self.flush()
 
 
 def main() -> None:
@@ -69,6 +105,8 @@ def main() -> None:
     parser.add_argument("--model", type=str, help="Model to use (overrides MINI_PI_MODEL env)")
     parser.add_argument("--cwd", type=str, help="Working directory (default: current)")
     args = parser.parse_args()
+
+    _load_dotenv_files()
 
     # Load config
     config = Config()
@@ -177,37 +215,42 @@ def _repl(agent: Agent, config: Config) -> None:
 
 
 def _run_streaming(agent: Agent, user_message: str) -> None:
-    """Run agent with a streaming Rich display.
+    """Run agent with a streaming display.
 
     We monkey-patch sys.stdout to capture streamed text chunks
-    from the agent, and render them in a Rich Live panel.
+    from the agent, and write them to the original stdout immediately.
     """
     import io
 
-    display = StreamingDisplay()
-    display.start()
-
     old_stdout = sys.stdout
+    display = StreamingDisplay(old_stdout)
+    display.start()
 
     class StreamCapture(io.TextIOBase):
         """Capture streamed text from the agent, pass to Rich display."""
-        def __init__(self, fallback):
+
+        def __init__(self, fallback, display: StreamingDisplay):
             self.fallback = fallback
+            self.display = display
+            self.in_reasoning = False
 
         def write(self, text: str) -> int:
             if text:
-                display.add(text)
+                if self.in_reasoning:
+                    self.display.add_reasoning(text)
+                else:
+                    self.display.add(text)
             return len(text) if text else 0
 
         def flush(self):
+            self.display.flush()
             self.fallback.flush()
 
-        # Rich Live needs to check if it's a terminal
         def isatty(self) -> bool:
             return False
 
     try:
-        sys.stdout = StreamCapture(old_stdout)  # type: ignore
+        sys.stdout = StreamCapture(old_stdout, display)  # type: ignore
         agent.chat(user_message)
     finally:
         sys.stdout = old_stdout

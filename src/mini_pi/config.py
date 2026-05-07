@@ -4,7 +4,6 @@ Configuration for mini-pi coding agent.
 
 import os
 from dataclasses import dataclass, field
-from typing import Optional
 
 from .compactor import CompactionConfig
 from .context import PruningConfig

@@ -5,12 +5,15 @@ Tests that skills are properly discovered, loaded, and integrated
 into the agent's system prompt and tool set.
 """
 
+import io
+import sys
 import pytest
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from mini_pi.agent import Agent
 from mini_pi.config import Config
+from mini_pi.main import StreamingDisplay
 from mini_pi.session import Session
 from mini_pi.skills import Skill, SkillManager
 
@@ -146,6 +149,22 @@ class TestAgentSkillIntegration:
         assert "write" in tool_names
         assert "edit" in tool_names
         assert "grep" in tool_names
+
+    def test_streaming_display_writes_to_original_stdout(self, monkeypatch):
+        """Interactive streaming should bypass captured sys.stdout and write immediately."""
+        original_stdout = io.StringIO()
+        captured_stdout = io.StringIO()
+        display = StreamingDisplay(original_stdout)
+
+        monkeypatch.setattr(sys, "stdout", captured_stdout)
+        display.start()
+        display.add_reasoning("thinking")
+        display.add("answer")
+        display.stop()
+
+        assert captured_stdout.getvalue() == ""
+        assert "thinking" in original_stdout.getvalue()
+        assert "\n\nanswer" in original_stdout.getvalue()
 
 
 class TestCustomSkill:

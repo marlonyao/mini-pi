@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import sys
-from typing import Any, Generator
+from typing import Any
 
 from openai import OpenAI
 
@@ -144,7 +144,6 @@ class Agent:
             *pruned,
         ]
 
-        # Try streaming first; fall back to non-stream if provider doesn't support it
         try:
             stream = self.client.chat.completions.create(
                 model=self.config.model,
@@ -172,15 +171,27 @@ class Agent:
                 continue
 
             delta = chunk.choices[0].delta
+            if delta is None:
+                continue
+
+            reasoning_delta = getattr(delta, "reasoning_content", None) or ""
+            text_delta = delta.content or ""
 
             # Reasoning content (DeepSeek thinking mode)
-            if hasattr(delta, "reasoning_content") and delta.reasoning_content:
-                reasoning_parts.append(delta.reasoning_content)
+            if reasoning_delta:
+                reasoning_parts.append(reasoning_delta)
+                # Tell StreamCapture this is reasoning so it can style differently
+                if hasattr(sys.stdout, "in_reasoning"):
+                    sys.stdout.in_reasoning = True
+                sys.stdout.write(reasoning_delta)
+                sys.stdout.flush()
 
             # Text content — print in real-time
-            if delta.content:
-                text_parts.append(delta.content)
-                sys.stdout.write(delta.content)
+            if text_delta:
+                if hasattr(sys.stdout, "in_reasoning"):
+                    sys.stdout.in_reasoning = False
+                text_parts.append(text_delta)
+                sys.stdout.write(text_delta)
                 sys.stdout.flush()
 
             # Tool calls — collect incrementally
@@ -205,6 +216,9 @@ class Agent:
             # Usage from last chunk
             if hasattr(chunk.choices[0], "usage") and chunk.choices[0].usage:
                 usage = chunk.choices[0].usage
+
+        if hasattr(sys.stdout, "in_reasoning"):
+            sys.stdout.in_reasoning = False
 
         text_content = "".join(text_parts)
         reasoning_content = "".join(reasoning_parts) if reasoning_parts else None
