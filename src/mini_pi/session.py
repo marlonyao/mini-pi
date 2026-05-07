@@ -124,6 +124,9 @@ class Session:
                 entry["tool_calls"] = msg["tool_calls"]
             if "tool_call_id" in msg:
                 entry["tool_call_id"] = msg["tool_call_id"]
+            # DeepSeek thinking mode: reasoning_content must be passed back
+            if "reasoning_content" in msg:
+                entry["reasoning_content"] = msg["reasoning_content"]
             if msg["role"] == "tool":
                 entry["role"] = "tool"
             result.append(entry)

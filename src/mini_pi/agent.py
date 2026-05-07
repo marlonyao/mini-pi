@@ -76,7 +76,7 @@ class Agent:
             # Auto-compaction: check if context is approaching limit
             self._maybe_compact()
 
-            text_content, tool_calls, usage = self._stream_llm()
+            text_content, tool_calls, usage, reasoning_content = self._stream_llm()
 
             # Track token usage
             if usage:
@@ -87,11 +87,11 @@ class Agent:
                 })
 
             if tool_calls:
-                # Add assistant message with tool calls
-                self.session.add_assistant(
-                    content=text_content,
-                    tool_calls=tool_calls,
-                )
+                # Add assistant message with tool calls (include reasoning_content for DeepSeek)
+                assistant_kwargs: dict[str, Any] = {"content": text_content, "tool_calls": tool_calls}
+                if reasoning_content:
+                    assistant_kwargs["reasoning_content"] = reasoning_content
+                self.session.add_assistant(**assistant_kwargs)
 
                 # Execute each tool call
                 for tc in tool_calls:
@@ -117,19 +117,23 @@ class Agent:
                 print()  # spacing before next LLM call
             else:
                 # No tool calls — final response
-                self.session.add_assistant(content=text_content)
+                assistant_kwargs = {"content": text_content}
+                if reasoning_content:
+                    assistant_kwargs["reasoning_content"] = reasoning_content
+                self.session.add_assistant(**assistant_kwargs)
                 self.session.save()
                 return text_content
 
         self.session.save()
         return "(agent reached max tool call steps without producing a final response)"
 
-    def _stream_llm(self) -> tuple[str, list[dict], Any]:
+    def _stream_llm(self) -> tuple[str, list[dict], Any, str | None]:
         """
-        Stream an LLM response. Returns (text, tool_calls, usage).
+        Stream an LLM response. Returns (text, tool_calls, usage, reasoning_content).
         
         Text content is printed to stdout in real-time.
         Tool calls are collected but not printed (we print them when executing).
+        reasoning_content is for DeepSeek-style thinking mode.
         """
         # Prune old tool results to reduce context size
         raw_messages = self.session.get_openai_messages()
@@ -148,13 +152,14 @@ class Agent:
                 tools=self.tools,
                 temperature=0,
                 stream=True,
-                stream_options={"include_usage": True},
             )
-        except Exception:
+        except Exception as e:
             # Fallback to non-streaming
+            print(f"  ⚠ Streaming not supported, falling back to sync mode...")
             return self._call_llm_sync()
 
         text_parts: list[str] = []
+        reasoning_parts: list[str] = []  # DeepSeek thinking content
         tool_calls_map: dict[int, dict] = {}  # index -> {id, function: {name, arguments}}
         usage = None
 
@@ -167,6 +172,10 @@ class Agent:
                 continue
 
             delta = chunk.choices[0].delta
+
+            # Reasoning content (DeepSeek thinking mode)
+            if hasattr(delta, "reasoning_content") and delta.reasoning_content:
+                reasoning_parts.append(delta.reasoning_content)
 
             # Text content — print in real-time
             if delta.content:
@@ -198,15 +207,16 @@ class Agent:
                 usage = chunk.choices[0].usage
 
         text_content = "".join(text_parts)
+        reasoning_content = "".join(reasoning_parts) if reasoning_parts else None
         tool_calls = [tool_calls_map[i] for i in sorted(tool_calls_map.keys())]
 
         # Add newline if we streamed text
         if text_content:
             print()  # newline after streamed text
 
-        return text_content, tool_calls, usage
+        return text_content, tool_calls, usage, reasoning_content
 
-    def _call_llm_sync(self) -> tuple[str, list[dict], Any]:
+    def _call_llm_sync(self) -> tuple[str, list[dict], Any, str | None]:
         """Non-streaming fallback for providers that don't support streaming."""
         # Prune old tool results to reduce context size
         raw_messages = self.session.get_openai_messages()
@@ -217,6 +227,7 @@ class Agent:
             *pruned,
         ]
 
+        print("  ⏳ Waiting for response...")
         response = self.client.chat.completions.create(
             model=self.config.model,
             messages=messages,
@@ -226,6 +237,7 @@ class Agent:
 
         msg = response.choices[0].message
         text_content = msg.content or ""
+        reasoning_content = getattr(msg, "reasoning_content", None) or None
         tool_calls = []
         if msg.tool_calls:
             tool_calls = [
@@ -243,7 +255,7 @@ class Agent:
         if text_content:
             print(text_content)
 
-        return text_content, tool_calls, response.usage
+        return text_content, tool_calls, response.usage, reasoning_content
 
     @staticmethod
     def _format_args(args: dict) -> str:
