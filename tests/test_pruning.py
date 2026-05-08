@@ -136,8 +136,8 @@ class TestPruningBasicBehavior:
 
 
 class TestSoftTrim:
-    def test_oversized_recent_result_soft_trimmed(self):
-        """Tool results exceeding soft_trim_chars get head+tail trimmed."""
+    def test_oversized_recent_result_kept_intact(self):
+        """Recent tool results should stay complete for the next model turn."""
         long_content = "A" * 800  # longer than soft_trim_chars=500
         messages = [
             make_user("do something"),
@@ -152,13 +152,7 @@ class TestSoftTrim:
         result = prune_messages(messages, config)
 
         tool_msg = [m for m in result if m["role"] == "tool"][0]
-        # Should be shorter than original
-        assert len(tool_msg["content"]) < len(long_content)
-        # Should contain head and tail
-        assert tool_msg["content"].startswith("A")
-        assert tool_msg["content"].endswith("A")
-        # Should contain truncation marker
-        assert "..." in tool_msg["content"] or "truncated" in tool_msg["content"].lower()
+        assert tool_msg["content"] == long_content
 
     def test_small_result_not_trimmed(self):
         """Tool results within soft_trim_chars should not be touched."""

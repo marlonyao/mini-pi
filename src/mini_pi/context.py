@@ -17,7 +17,7 @@ class PruningConfig:
 
     enabled: bool = True
     keep_recent_turns: int = 3      # Keep tool results from the last N turns intact
-    soft_trim_chars: int = 500      # Tool results longer than this get head+tail trimmed
+    soft_trim_chars: int = 500      # Kept for config compatibility; recent tool results remain intact
     max_tool_result_chars: int = 2000  # Hard limit for any single tool result
 
 
@@ -33,7 +33,7 @@ def prune_messages(
 
     Strategy:
     1. Find all tool result messages and group them into "turns"
-    2. Tool results from the last N turns are kept intact (but soft-trimmed if oversized)
+    2. Tool results from the last N turns are kept intact
     3. Tool results older than N turns are replaced with a placeholder
     4. User and assistant messages are never modified
 
@@ -83,18 +83,8 @@ def prune_messages(
                 new_msg["content"] = "[tool output removed - older than recent turns]"
                 result.append(new_msg)
             elif i in recent_indices:
-                # Keep but soft-trim if oversized
-                new_msg = copy.copy(msg)
-                content = msg.get("content", "")
-                if len(content) > config.soft_trim_chars:
-                    head_len = config.soft_trim_chars // 2
-                    tail_len = config.soft_trim_chars // 2
-                    new_msg["content"] = (
-                        content[:head_len]
-                        + f"\n... [truncated {len(content) - head_len - tail_len} chars] ...\n"
-                        + content[-tail_len:]
-                    )
-                result.append(new_msg)
+                # Keep recent results intact so the next model turn can use the full tool output.
+                result.append(copy.copy(msg))
             else:
                 result.append(copy.copy(msg))
         else:
