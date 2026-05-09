@@ -2,11 +2,12 @@
 Agent loop for mini-pi.
 
 The core cycle:
-  1. Send messages + system prompt to LLM (streaming)
+  1. Send messages + system prompt to LLM (via LLMBase abstraction)
   2. If LLM returns tool calls → execute them → add results → go to 1
   3. If LLM returns text only → done, display to user
 
-Uses streaming for real-time output — you see the response as it's generated.
+The LLMBase abstraction handles streaming internally and returns
+complete ChatResponse objects. Real-time output uses callbacks.
 """
 
 from __future__ import annotations
@@ -15,11 +16,10 @@ import json
 import sys
 from typing import Any
 
-from openai import OpenAI
-
 from .compactor import Compactor, CompactionConfig
 from .config import Config
 from .context import prune_messages, PruningConfig
+from .llm import LLMBase, OpenAILLM
 from .session import Session
 from .skills import SkillManager
 from .system_prompt import build_system_prompt
@@ -30,14 +30,19 @@ from .token_estimator import TokenEstimator
 class Agent:
     """The coding agent: orchestrates LLM calls and tool execution."""
 
-    def __init__(self, config: Config, session: Session):
+    def __init__(self, config: Config, session: Session, llm: LLMBase | None = None):
         self.config = config
         self.session = session
 
-        self.client = OpenAI(
-            api_key=config.api_key,
-            base_url=config.base_url,
-        )
+        # LLM abstraction — inject or create from config
+        if llm is not None:
+            self.llm = llm
+        else:
+            self.llm = OpenAILLM(
+                api_key=config.api_key,
+                base_url=config.base_url,
+                model=config.model,
+            )
 
         self.tools = get_openai_tools()
         self.system_prompt = build_system_prompt(cwd=config.cwd)
@@ -53,8 +58,12 @@ class Agent:
         if skill_catalog:
             self.system_prompt += skill_catalog
 
-        # Compaction support
-        self.compactor = Compactor(config.compaction, client=self.client)
+        # Compaction support — reuse the LLM's OpenAI client for summarization
+        # (compactor still uses raw OpenAI client for simplicity)
+        self.compactor = Compactor(config.compaction)
+        if isinstance(self.llm, OpenAILLM):
+            self.compactor.client = self.llm.client
+
         self.token_estimator = TokenEstimator(
             max_context_tokens=config.compaction.max_context_tokens,
         )
@@ -73,31 +82,43 @@ class Agent:
             # Auto-compaction: check if context is approaching limit
             self._maybe_compact()
 
-            text_content, tool_calls, usage, reasoning_content = self._stream_llm()
+            # Build messages for this turn
+            raw_messages = self.session.get_openai_messages()
+            pruned = prune_messages(raw_messages, self.config.pruning)
+            messages = [
+                {"role": "system", "content": self.system_prompt},
+                *pruned,
+            ]
+
+            # Call LLM via abstraction
+            response = self.llm.chat(
+                messages=messages,
+                tools=self.tools,
+                on_text=self._on_text,
+                on_reasoning=self._on_reasoning,
+            )
 
             # Track token usage
-            if usage:
-                self.session.update_token_usage({
-                    "prompt_tokens": getattr(usage, "prompt_tokens", 0) or 0,
-                    "completion_tokens": getattr(usage, "completion_tokens", 0) or 0,
-                    "total_tokens": getattr(usage, "total_tokens", 0) or 0,
-                })
+            if response.usage:
+                self.session.update_token_usage(response.usage.to_dict())
 
-            if tool_calls:
-                # Add assistant message with tool calls (include reasoning_content for DeepSeek)
-                assistant_kwargs: dict[str, Any] = {"content": text_content, "tool_calls": tool_calls}
-                if reasoning_content:
-                    assistant_kwargs["reasoning_content"] = reasoning_content
+            if response.has_tool_calls:
+                # Add assistant message with tool calls
+                assistant_kwargs: dict[str, Any] = {
+                    "content": response.content,
+                    "tool_calls": [tc.to_openai_dict() for tc in response.tool_calls],
+                }
+                if response.reasoning_content:
+                    assistant_kwargs["reasoning_content"] = response.reasoning_content
                 self.session.add_assistant(**assistant_kwargs)
 
                 # Execute each tool call
-                for tc in tool_calls:
-                    fn = tc["function"]
-                    args = json.loads(fn["arguments"])
-                    print(f"\n  🔧 {fn['name']}({self._format_args(args)})")
+                for tc in response.tool_calls:
+                    args = json.loads(tc.arguments)
+                    print(f"\n  🔧 {tc.name}({self._format_args(args)})")
 
                     result = execute_tool(
-                        fn["name"],
+                        tc.name,
                         args,
                         timeout=self.config.timeout,
                         cwd=self.config.cwd,
@@ -109,164 +130,30 @@ class Agent:
                         preview += "..."
                     print(f"     → {preview}")
 
-                    self.session.add_tool_result(tc["id"], result)
+                    self.session.add_tool_result(tc.id, result)
 
                 print()  # spacing before next LLM call
             else:
                 # No tool calls — final response
-                assistant_kwargs = {"content": text_content}
-                if reasoning_content:
-                    assistant_kwargs["reasoning_content"] = reasoning_content
+                assistant_kwargs = {"content": response.content}
+                if response.reasoning_content:
+                    assistant_kwargs["reasoning_content"] = response.reasoning_content
                 self.session.add_assistant(**assistant_kwargs)
                 self.session.save()
-                return text_content
+                return response.content
 
         self.session.save()
         return "(agent reached max tool call steps without producing a final response)"
 
-    def _stream_llm(self) -> tuple[str, list[dict], Any, str | None]:
-        """
-        Stream an LLM response. Returns (text, tool_calls, usage, reasoning_content).
-        
-        Text content is printed to stdout in real-time.
-        Tool calls are collected but not printed (we print them when executing).
-        reasoning_content is for DeepSeek-style thinking mode.
-        """
-        # Prune old tool results to reduce context size
-        raw_messages = self.session.get_openai_messages()
-        pruned = prune_messages(raw_messages, self.config.pruning)
+    def _on_text(self, text: str) -> None:
+        """Callback: print text as it streams in."""
+        sys.stdout.write(text)
+        sys.stdout.flush()
 
-        messages = [
-            {"role": "system", "content": self.system_prompt},
-            *pruned,
-        ]
-
-        try:
-            stream = self.client.chat.completions.create(
-                model=self.config.model,
-                messages=messages,
-                tools=self.tools,
-                temperature=0,
-                stream=True,
-            )
-        except Exception as e:
-            # Fallback to non-streaming
-            print(f"  ⚠ Streaming not supported, falling back to sync mode...")
-            return self._call_llm_sync()
-
-        text_parts: list[str] = []
-        reasoning_parts: list[str] = []  # DeepSeek thinking content
-        tool_calls_map: dict[int, dict] = {}  # index -> {id, function: {name, arguments}}
-        usage = None
-
-        for chunk in stream:
-            if not chunk.choices and hasattr(chunk, "usage") and chunk.usage:
-                usage = chunk.usage
-                continue
-
-            if not chunk.choices:
-                continue
-
-            delta = chunk.choices[0].delta
-            if delta is None:
-                continue
-
-            reasoning_delta = getattr(delta, "reasoning_content", None) or ""
-            text_delta = delta.content or ""
-
-            # Reasoning content (DeepSeek thinking mode)
-            if reasoning_delta:
-                reasoning_parts.append(reasoning_delta)
-                # Tell StreamCapture this is reasoning so it can style differently
-                if hasattr(sys.stdout, "in_reasoning"):
-                    sys.stdout.in_reasoning = True
-                sys.stdout.write(reasoning_delta)
-                sys.stdout.flush()
-
-            # Text content — print in real-time
-            if text_delta:
-                if hasattr(sys.stdout, "in_reasoning"):
-                    sys.stdout.in_reasoning = False
-                text_parts.append(text_delta)
-                sys.stdout.write(text_delta)
-                sys.stdout.flush()
-
-            # Tool calls — collect incrementally
-            if delta.tool_calls:
-                for tc_delta in delta.tool_calls:
-                    idx = tc_delta.index
-                    if idx not in tool_calls_map:
-                        tool_calls_map[idx] = {
-                            "id": "",
-                            "type": "function",
-                            "function": {"name": "", "arguments": ""},
-                        }
-                    tc = tool_calls_map[idx]
-                    if tc_delta.id:
-                        tc["id"] = tc_delta.id
-                    if tc_delta.function:
-                        if tc_delta.function.name:
-                            tc["function"]["name"] += tc_delta.function.name
-                        if tc_delta.function.arguments:
-                            tc["function"]["arguments"] += tc_delta.function.arguments
-
-            # Usage from last chunk
-            if hasattr(chunk.choices[0], "usage") and chunk.choices[0].usage:
-                usage = chunk.choices[0].usage
-
-        if hasattr(sys.stdout, "in_reasoning"):
-            sys.stdout.in_reasoning = False
-
-        text_content = "".join(text_parts)
-        reasoning_content = "".join(reasoning_parts) if reasoning_parts else None
-        tool_calls = [tool_calls_map[i] for i in sorted(tool_calls_map.keys())]
-
-        # Add newline if we streamed text
-        if text_content:
-            print()  # newline after streamed text
-
-        return text_content, tool_calls, usage, reasoning_content
-
-    def _call_llm_sync(self) -> tuple[str, list[dict], Any, str | None]:
-        """Non-streaming fallback for providers that don't support streaming."""
-        # Prune old tool results to reduce context size
-        raw_messages = self.session.get_openai_messages()
-        pruned = prune_messages(raw_messages, self.config.pruning)
-
-        messages = [
-            {"role": "system", "content": self.system_prompt},
-            *pruned,
-        ]
-
-        print("  ⏳ Waiting for response...")
-        response = self.client.chat.completions.create(
-            model=self.config.model,
-            messages=messages,
-            tools=self.tools,
-            temperature=0,
-        )
-
-        msg = response.choices[0].message
-        text_content = msg.content or ""
-        reasoning_content = getattr(msg, "reasoning_content", None) or None
-        tool_calls = []
-        if msg.tool_calls:
-            tool_calls = [
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {
-                        "name": tc.function.name,
-                        "arguments": tc.function.arguments,
-                    },
-                }
-                for tc in msg.tool_calls
-            ]
-
-        if text_content:
-            print(text_content)
-
-        return text_content, tool_calls, response.usage, reasoning_content
+    def _on_reasoning(self, text: str) -> None:
+        """Callback: print reasoning content (DeepSeek thinking mode)."""
+        sys.stdout.write(text)
+        sys.stdout.flush()
 
     @staticmethod
     def _format_args(args: dict) -> str:

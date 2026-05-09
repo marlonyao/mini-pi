@@ -17,6 +17,7 @@ from unittest.mock import patch
 
 from mini_pi.agent import Agent
 from mini_pi.config import Config
+from mini_pi.llm import FakeLLM
 from mini_pi.main import StreamingDisplay
 from mini_pi.session import Session
 from mini_pi.skills import Skill, SkillManager
@@ -79,9 +80,8 @@ class TestAgentSkillIntegration:
             skill_dirs=[str(skills_dir_with_frontmatter)],
         )
         session = Session(tmp_path / "test.jsonl")
-
-        with patch("mini_pi.agent.OpenAI"):
-            agent = Agent(config, session)
+        fake_llm = FakeLLM()
+        agent = Agent(config, session, llm=fake_llm)
 
         assert len(agent.skill_manager.skills) >= 1
         names = {s.name for s in agent.skill_manager.skills}
@@ -94,9 +94,8 @@ class TestAgentSkillIntegration:
             skill_dirs=[str(skills_dir_with_frontmatter)],
         )
         session = Session(tmp_path / "test.jsonl")
-
-        with patch("mini_pi.agent.OpenAI"):
-            agent = Agent(config, session)
+        fake_llm = FakeLLM()
+        agent = Agent(config, session, llm=fake_llm)
 
         prompt = agent.system_prompt
         # Should have XML catalog
@@ -113,9 +112,8 @@ class TestAgentSkillIntegration:
             skill_dirs=[str(skills_dir_with_frontmatter)],
         )
         session = Session(tmp_path / "test.jsonl")
-
-        with patch("mini_pi.agent.OpenAI"):
-            agent = Agent(config, session)
+        fake_llm = FakeLLM()
+        agent = Agent(config, session, llm=fake_llm)
 
         # The detailed instructions should not be injected
         assert "- [ ] Correctness" not in agent.system_prompt
@@ -128,9 +126,8 @@ class TestAgentSkillIntegration:
             skill_dirs=[str(skills_dir_with_frontmatter)],
         )
         session = Session(tmp_path / "test.jsonl")
-
-        with patch("mini_pi.agent.OpenAI"):
-            agent = Agent(config, session)
+        fake_llm = FakeLLM()
+        agent = Agent(config, session, llm=fake_llm)
 
         assert "read tool" in agent.system_prompt
 
@@ -141,9 +138,8 @@ class TestAgentSkillIntegration:
             skill_dirs=[str(skills_dir_with_frontmatter)],
         )
         session = Session(tmp_path / "test.jsonl")
-
-        with patch("mini_pi.agent.OpenAI"):
-            agent = Agent(config, session)
+        fake_llm = FakeLLM()
+        agent = Agent(config, session, llm=fake_llm)
 
         tool_names = {t["function"]["name"] for t in agent.tools}
         assert tool_names == {"bash", "read", "write", "edit", "grep"}
@@ -173,9 +169,8 @@ class TestAgentSkillIntegration:
             skill_dirs=[str(tmp_path)],
         )
         session = Session(tmp_path / "test.jsonl")
-
-        with patch("mini_pi.agent.OpenAI"):
-            agent = Agent(config, session)
+        fake_llm = FakeLLM()
+        agent = Agent(config, session, llm=fake_llm)
 
         tool_names = {t["function"]["name"] for t in agent.tools}
         # Only core tools, NOT skill tools
