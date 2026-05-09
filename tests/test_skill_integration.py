@@ -142,7 +142,7 @@ class TestAgentSkillIntegration:
         agent = Agent(config, session, llm=fake_llm)
 
         tool_names = {t["function"]["name"] for t in agent.tools}
-        assert tool_names == {"bash", "read", "write", "edit", "grep"}
+        assert tool_names == {"bash", "read", "write", "edit", "grep", "find", "ls"}
 
     def test_no_skill_tools_pre_registered(self, tmp_path):
         """Skill tools should NOT be pre-registered at startup."""
@@ -175,7 +175,7 @@ class TestAgentSkillIntegration:
         tool_names = {t["function"]["name"] for t in agent.tools}
         # Only core tools, NOT skill tools
         assert "count" not in tool_names
-        assert tool_names == {"bash", "read", "write", "edit", "grep"}
+        assert tool_names == {"bash", "read", "write", "edit", "grep", "find", "ls"}
 
 
 # ── StreamingDisplay test (unchanged) ──────────────────────────────
