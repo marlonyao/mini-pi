@@ -288,7 +288,14 @@ class Agent:
         messages = self.session.get_openai_messages()
         if self.token_estimator.should_compact(messages, threshold=config.threshold):
             print("\n  🧹 Auto-compacting conversation...")
-            result = self.compactor.compact(messages)
+
+            # Support incremental update if we have a previous summary
+            existing_summary = getattr(self.session, "_last_compaction_summary", "")
+
+            result = self.compactor.compact(
+                messages,
+                existing_summary=existing_summary,
+            )
             if result.success:
                 self.session.record_compaction(result)
                 print(f"     Compacted {result.original_count} → {result.compacted_count} messages")

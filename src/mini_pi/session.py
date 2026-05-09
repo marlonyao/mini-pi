@@ -42,13 +42,13 @@ class Session:
     def record_compaction(self, result: "CompactResult") -> None:
         """Record a compaction event in the session.
 
-        This adds a meta entry to the JSONL so we know compaction happened,
-        and replaces older messages with the summary + recent tail.
+        Replaces older messages with the summary + recent tail.
+        Full history is preserved in the JSONL before this point.
         """
         if not result.success:
             return
 
-        # Store the summary as a special message
+        # Store the summary as a system message
         summary_msg = {
             "role": "system",
             "content": f"[Compaction Summary]\n{result.summary}",
@@ -60,8 +60,10 @@ class Session:
         # Replace messages: summary + recent
         self.messages = [summary_msg] + list(recent)
 
-        # Add compaction meta entry
+        # Track compaction count
         self._compaction_count = getattr(self, "_compaction_count", 0) + 1
+        # Store latest summary for incremental updates
+        self._last_compaction_summary = result.summary
 
     def save(self) -> None:
         """Persist session to JSONL file."""

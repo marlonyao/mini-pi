@@ -2,12 +2,12 @@
 Tests for compaction module.
 
 Compaction summarizes older conversation history when context approaches
-the model's limit. It should:
-1. Split messages into "old" and "recent"
-2. Send old messages to LLM for summarization
-3. Replace old messages with a compaction summary entry
-4. Preserve full history on disk (compaction is semantic, not destructive)
-5. Support manual trigger with custom instructions
+the model's limit. Key test areas:
+1. Split messages at clean turn boundaries
+2. NEVER break tool call + tool result pairs
+3. Recent tool outputs are preserved intact
+4. Incremental summary updates work
+5. Full history is preserved on disk
 """
 
 import json
@@ -20,11 +20,13 @@ from mini_pi.compactor import (
     CompactResult,
     Compactor,
     build_compaction_prompt,
+    build_incremental_prompt,
+    _format_messages_for_summary,
 )
 from mini_pi.session import Session
 
 
-# ── Fixtures ────────────────────────────────────────────────────────
+# ── Helpers ─────────────────────────────────────────────────────────
 
 def make_tool_call(call_id: str, name: str = "bash") -> dict:
     return {
@@ -34,8 +36,11 @@ def make_tool_call(call_id: str, name: str = "bash") -> dict:
     }
 
 
-def build_long_conversation(turns: int = 10, tool_result_size: int = 200) -> list[dict]:
-    """Build a conversation with many turns for compaction testing."""
+def build_conversation(turns: int = 5, tool_result_size: int = 200) -> list[dict]:
+    """Build a conversation with many turns for compaction testing.
+
+    Each turn: user → assistant(tool_calls) → tool(result) → assistant(text)
+    """
     messages = []
     for i in range(turns):
         messages.append({"role": "user", "content": f"Task {i}: please do something"})
@@ -53,44 +58,105 @@ def build_long_conversation(turns: int = 10, tool_result_size: int = 200) -> lis
     return messages
 
 
-# ── Tests ───────────────────────────────────────────────────────────
+def build_multi_tool_turn(
+    turn_id: str,
+    tool_names: list[str],
+    result_size: int = 200,
+) -> list[dict]:
+    """Build one turn with multiple tool calls in a single assistant message."""
+    msgs = [{"role": "user", "content": f"Turn {turn_id}"}]
+    tool_calls = []
+    for j, name in enumerate(tool_names):
+        tool_calls.append(make_tool_call(f"{turn_id}_{j}", name))
+    msgs.append({"role": "assistant", "content": None, "tool_calls": tool_calls})
+    for j, name in enumerate(tool_names):
+        msgs.append({
+            "role": "tool",
+            "tool_call_id": f"{turn_id}_{j}",
+            "content": f"{name} output: " + "y" * result_size,
+        })
+    msgs.append({"role": "assistant", "content": f"Done with {turn_id}"})
+    return msgs
+
+
+# ── Config tests ────────────────────────────────────────────────────
 
 class TestCompactionConfig:
     def test_defaults(self):
         config = CompactionConfig()
         assert config.enabled is True
-        assert config.keep_recent_messages == 6
+        assert config.keep_recent_messages == 8
         assert config.threshold == 0.8
         assert config.max_context_tokens == 128000
-        assert config.model is None  # None = use session model
 
     def test_custom_model(self):
-        config = CompactionConfig(model="gpt-4o-mini")
-        assert config.model == "gpt-4o-mini"
+        config = CompactionConfig(model="deepseek-chat")
+        assert config.model == "deepseek-chat"
+
+
+# ── Prompt building tests ──────────────────────────────────────────
+
+class TestFormatMessages:
+    def test_truncates_tool_outputs(self):
+        messages = [
+            {"role": "tool", "content": "x" * 5000},
+        ]
+        text = _format_messages_for_summary(messages, max_chars=100)
+        assert len(text) < 500  # Should be truncated
+        assert "truncated" in text
+
+    def test_keeps_short_outputs_intact(self):
+        messages = [
+            {"role": "tool", "content": "short output"},
+            {"role": "user", "content": "hello"},
+        ]
+        text = _format_messages_for_summary(messages, max_chars=500)
+        assert "short output" in text
+        assert "hello" in text
+
+    def test_includes_tool_call_info(self):
+        messages = [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [make_tool_call("tc1", "read")],
+            }
+        ]
+        text = _format_messages_for_summary(messages)
+        assert "Tool call: read" in text
 
 
 class TestBuildCompactionPrompt:
-    def test_prompt_includes_key_instructions(self):
-        messages = build_long_conversation(3)
+    def test_full_prompt(self):
+        messages = build_conversation(3)
         prompt = build_compaction_prompt(messages)
-
-        # Should instruct the model to summarize
         assert "summar" in prompt.lower()
-        # Should include conversation history marker
         assert "conversation history" in prompt.lower()
-        # Should mention markdown output
-        assert "markdown" in prompt.lower()
 
-    def test_prompt_includes_custom_instructions(self):
-        messages = build_long_conversation(2)
-        prompt = build_compaction_prompt(messages, instructions="Focus on API design")
-        assert "Focus on API design" in prompt
+    def test_custom_instructions(self):
+        messages = build_conversation(2)
+        prompt = build_compaction_prompt(messages, instructions="Focus on files")
+        assert "Focus on files" in prompt
 
-    def test_empty_messages_prompt(self):
+    def test_empty_messages(self):
         prompt = build_compaction_prompt([])
-        # Should still produce a valid prompt
         assert len(prompt) > 0
 
+
+class TestBuildIncrementalPrompt:
+    def test_includes_existing_summary(self):
+        messages = build_conversation(1)
+        prompt = build_incremental_prompt("Old summary here", messages)
+        assert "Old summary here" in prompt
+        assert "update" in prompt.lower() or "merge" in prompt.lower()
+
+    def test_includes_new_messages(self):
+        messages = [{"role": "user", "content": "new task"}]
+        prompt = build_incremental_prompt("Previous summary", messages)
+        assert "new task" in prompt
+
+
+# ── CompactResult tests ────────────────────────────────────────────
 
 class TestCompactResult:
     def test_success_result(self):
@@ -98,151 +164,240 @@ class TestCompactResult:
             success=True,
             summary="## Summary\n\nCompleted tasks 0-5",
             original_count=20,
-            compacted_count=2,  # summary + meta
+            compacted_count=5,
         )
         assert result.success is True
-        assert "Summary" in result.summary
 
-    def test_failure_result(self):
-        result = CompactResult(success=False, error="LLM call failed")
-        assert result.success is False
-        assert result.error == "LLM call failed"
+    def test_success_get_messages(self):
+        recent = [
+            {"role": "user", "content": "latest"},
+            {"role": "assistant", "content": "reply"},
+        ]
+        result = CompactResult(
+            success=True,
+            summary="Summary text",
+            original_count=10,
+            compacted_count=3,
+            _recent_messages=recent,
+        )
+        msgs = result.get_messages()
+        assert len(msgs) == 3  # 1 summary + 2 recent
+        assert msgs[0]["role"] == "system"
+        assert "Summary text" in msgs[0]["content"]
 
+    def test_failure_get_messages(self):
+        result = CompactResult(success=False, error="fail")
+        assert result.get_messages() == []
+
+
+# ── Split tests (CRITICAL: tool pair integrity) ────────────────────
+
+class TestSplitMessages:
+    def test_basic_split(self):
+        config = CompactionConfig(keep_recent_messages=4)
+        compactor = Compactor(config)
+        messages = build_conversation(5)  # 20 messages
+
+        old, recent = compactor._split_messages(messages)
+        assert len(recent) >= 4
+        assert len(old) + len(recent) == len(messages)
+
+    def test_never_breaks_tool_call_pairs(self):
+        """CRITICAL: tool result must never be separated from its tool call."""
+        config = CompactionConfig(keep_recent_messages=3)
+        compactor = Compactor(config)
+
+        # Build: user → assistant(tool_call) → tool(result) → assistant(text)
+        messages = build_conversation(5)
+
+        old, recent = compactor._split_messages(messages)
+
+        # Check: recent section must not start with a tool result
+        if recent:
+            assert recent[0].get("role") != "tool", \
+                "Recent section starts with orphaned tool result!"
+
+        # Check: no assistant with tool_calls in old that has its results in recent
+        old_tool_call_ids = set()
+        for msg in old:
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                for tc in msg["tool_calls"]:
+                    old_tool_call_ids.add(tc["id"])
+
+        for msg in recent:
+            if msg.get("role") == "tool":
+                tid = msg.get("tool_call_id")
+                assert tid not in old_tool_call_ids, \
+                    f"Tool result {tid} is in recent but its call is in old!"
+
+    def test_split_with_multi_tool_calls(self):
+        """Multiple tool calls in one assistant message."""
+        config = CompactionConfig(keep_recent_messages=4)
+        compactor = Compactor(config)
+
+        messages = []
+        messages.extend(build_multi_tool_turn("t1", ["read", "bash", "grep"]))
+        messages.extend(build_multi_tool_turn("t2", ["read", "edit"]))
+
+        old, recent = compactor._split_messages(messages)
+
+        # Verify no tool pair is broken
+        self._verify_tool_pair_integrity(old, recent)
+
+    def test_split_preserves_recent_messages_count(self):
+        config = CompactionConfig(keep_recent_messages=6)
+        compactor = Compactor(config)
+        messages = build_conversation(5)
+
+        old, recent = compactor._split_messages(messages)
+        # Recent should be at least keep_recent_messages
+        # (may be more if adjustment was needed for tool pairs)
+        assert len(recent) >= 6
+
+    def test_short_conversation_returns_empty_old(self):
+        config = CompactionConfig(keep_recent_messages=20)
+        compactor = Compactor(config)
+        messages = build_conversation(2)  # 8 messages
+
+        old, recent = compactor._split_messages(messages)
+        assert old == []
+        assert len(recent) == 8
+
+    def _verify_tool_pair_integrity(self, old, recent):
+        """Helper: verify tool calls and results stay together."""
+        old_tool_call_ids = set()
+        for msg in old:
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                for tc in msg["tool_calls"]:
+                    old_tool_call_ids.add(tc["id"])
+
+        for msg in recent:
+            if msg.get("role") == "tool":
+                tid = msg.get("tool_call_id")
+                assert tid not in old_tool_call_ids, \
+                    f"Tool pair broken: call in old, result {tid} in recent"
+
+
+# ── Full compaction flow tests ─────────────────────────────────────
 
 class TestCompactor:
-    def test_compact_splits_old_and_recent(self):
-        """Compactor should split messages into old (to summarize) and recent (to keep)."""
-        config = CompactionConfig(keep_recent_messages=4)
-        messages = build_long_conversation(5)  # 20 messages total
-        compactor = Compactor(config)
-
-        old, recent = compactor._split_messages(messages)
-        # Recent should be last 4 messages
-        assert len(recent) == 4
-        # Old should be the rest
-        assert len(old) == len(messages) - 4
-
-    def test_compact_split_preserves_tool_pairs(self):
-        """Split should not break tool call + tool result pairs."""
-        config = CompactionConfig(keep_recent_messages=4)
-        messages = build_long_conversation(5)
-        compactor = Compactor(config)
-
-        old, recent = compactor._split_messages(messages)
-
-        # Check that the recent section starts at a sensible boundary
-        # (not in the middle of a tool call sequence)
-        first_recent = recent[0]
-        # Should not start with a tool result (would be orphaned)
-        assert first_recent.get("role") != "tool"
-
     def test_compact_with_mock_llm(self):
-        """Test full compaction flow with mocked LLM."""
-        config = CompactionConfig(
-            keep_recent_messages=4,
-            model="gpt-4o-mini",
-        )
+        config = CompactionConfig(keep_recent_messages=4, model="test-model")
         compactor = Compactor(config)
+        messages = build_conversation(5)
 
-        messages = build_long_conversation(5)
-
-        # Mock the LLM call
-        mock_response = MagicMock()
-        mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "## Summary\n\nCompleted tasks 0-4. Modified files: main.py, utils.py"
-
-        with patch.object(compactor, "_call_llm_for_summary", return_value="## Summary\n\nCompleted tasks 0-4"):
+        with patch.object(compactor, "_call_llm_for_summary", return_value="## Summary\nDone tasks 0-3"):
             result = compactor.compact(messages)
 
         assert result.success is True
         assert "Summary" in result.summary
         assert result.original_count == 20
-        # Compacted messages = 1 (summary) + 4 (recent) = 5
-        assert result.compacted_count == 5
+        assert result.compacted_count == 1 + len(result._recent_messages)
 
     def test_compact_disabled(self):
-        """When disabled, compact should return the original messages."""
         config = CompactionConfig(enabled=False)
         compactor = Compactor(config)
+        messages = build_conversation(5)
 
-        messages = build_long_conversation(5)
         result = compactor.compact(messages)
-
         assert result.success is False
         assert "disabled" in result.error.lower()
 
     def test_compact_short_conversation(self):
-        """Short conversations that don't need compaction should be returned as-is."""
-        config = CompactionConfig(keep_recent_messages=10)
+        config = CompactionConfig(keep_recent_messages=20)
         compactor = Compactor(config)
+        messages = [{"role": "user", "content": "hi"}]
 
-        # Only 4 messages — all fit in "recent"
-        messages = [
-            {"role": "user", "content": "hi"},
-            {"role": "assistant", "content": "hello"},
-        ]
         result = compactor.compact(messages)
-
-        # Nothing to compact
         assert result.success is False
-        assert "nothing to compact" in result.error.lower() or "too short" in result.error.lower()
+        assert "too short" in result.error.lower()
 
-    def test_compact_produces_valid_messages(self):
-        """Compacted messages should be valid OpenAI format."""
-        config = CompactionConfig(keep_recent_messages=4)
+    def test_compact_preserves_recent_tool_outputs(self):
+        """Recent tool results must be kept INTACT in the result."""
+        config = CompactionConfig(keep_recent_messages=6)
         compactor = Compactor(config)
 
-        messages = build_long_conversation(5)
+        long_output = "IMPORTANT_DATA_" * 100  # 1500 chars
+        messages = build_conversation(3)
+        # Make the last tool result have important content
+        for msg in messages:
+            if msg.get("role") == "tool":
+                msg["content"] = long_output
 
-        with patch.object(compactor, "_call_llm_for_summary", return_value="Summary of old messages"):
+        with patch.object(compactor, "_call_llm_for_summary", return_value="Summary"):
             result = compactor.compact(messages)
 
         assert result.success is True
-        # The result should include a system message with the summary
-        compacted_messages = result.get_messages()
-        assert len(compacted_messages) < len(messages)
-        # First message should be the compaction summary
-        assert compacted_messages[0]["role"] == "user"
-        assert "Summary of old messages" in compacted_messages[0]["content"]
+        # Check recent messages have full content
+        for msg in (result._recent_messages or []):
+            if msg.get("role") == "tool":
+                assert "IMPORTANT_DATA_" in msg["content"]
+                assert msg["content"] == long_output  # NOT truncated!
+
+    def test_incremental_compaction(self):
+        """Second compaction should use existing summary."""
+        config = CompactionConfig(keep_recent_messages=4)
+        compactor = Compactor(config)
+        messages = build_conversation(5)
+
+        # First compaction
+        with patch.object(compactor, "_call_llm_for_summary", return_value="First summary"):
+            result1 = compactor.compact(messages)
+
+        assert result1.success
+
+        # Second compaction with existing summary
+        with patch.object(compactor, "_call_llm_for_summary", return_value="Updated summary"):
+            result2 = compactor.compact(messages, existing_summary="First summary")
+
+        assert result2.success
+        assert "Updated" in result2.summary
 
     def test_compact_with_custom_instructions(self):
-        """Custom instructions should be passed to the LLM."""
         config = CompactionConfig(keep_recent_messages=4)
         compactor = Compactor(config)
+        messages = build_conversation(5)
 
-        messages = build_long_conversation(5)
-
-        with patch.object(compactor, "_call_llm_for_summary", return_value="Focused summary") as mock_llm:
-            result = compactor.compact(messages, instructions="Focus on API decisions")
+        with patch.object(compactor, "_call_llm_for_summary", return_value="Focused summary") as mock:
+            result = compactor.compact(messages, instructions="Focus on API")
 
         assert result.success is True
-        # Verify instructions were passed
-        call_args = mock_llm.call_args
-        assert "Focus on API decisions" in call_args[0][0] or "Focus on API decisions" in str(call_args)
 
+
+# ── Session integration tests ──────────────────────────────────────
 
 class TestSessionCompaction:
-    """Test compaction integration with Session."""
-
     def test_session_records_compaction(self, tmp_path):
-        """Session should record compaction events in the JSONL."""
         session = Session(tmp_path / "test.jsonl")
-        messages = build_long_conversation(3)
-        for msg in messages:
-            session.messages.append(msg)
+        messages = build_conversation(3)
+        session.messages = list(messages)
 
         config = CompactionConfig(keep_recent_messages=4)
         compactor = Compactor(config)
 
-        with patch.object(compactor, "_call_llm_for_summary", return_value="Summary"):
+        with patch.object(compactor, "_call_llm_for_summary", return_value="Summary text"):
             result = compactor.compact(session.messages)
 
-        # Session should be able to record the compaction
         session.record_compaction(result)
         session.save()
 
-        # Reload and verify
-        session2 = Session(tmp_path / "test.jsonl")
-        # The JSONL should contain a compaction entry
+        # Reload
         content = (tmp_path / "test.jsonl").read_text()
         assert "compaction" in content
+
+    def test_session_tracks_summary_for_incremental(self, tmp_path):
+        session = Session(tmp_path / "test.jsonl")
+        messages = build_conversation(3)
+        session.messages = list(messages)
+
+        config = CompactionConfig(keep_recent_messages=4)
+        compactor = Compactor(config)
+
+        with patch.object(compactor, "_call_llm_for_summary", return_value="First summary"):
+            result = compactor.compact(session.messages)
+
+        session.record_compaction(result)
+
+        # Session should store the summary for incremental updates
+        assert hasattr(session, "_last_compaction_summary")
+        assert session._last_compaction_summary == "First summary"

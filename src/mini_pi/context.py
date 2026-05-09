@@ -1,14 +1,17 @@
 """
 Context management for mini-pi.
 
-Handles pruning (trimming old tool results) and compaction (summarizing old conversation).
-Inspired by Pi's layered context management strategy.
+Pruning: trims old tool results to reduce context size.
+Does NOT touch recent tool results — only clears results from old turns.
+
+Key principle: recent tool outputs must be kept INTACT so the LLM can use them.
+Only old turn results get replaced with a short placeholder.
 """
 
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass
@@ -16,9 +19,35 @@ class PruningConfig:
     """Configuration for session pruning (trimming old tool results)."""
 
     enabled: bool = True
-    keep_recent_turns: int = 3      # Keep tool results from the last N turns intact
-    soft_trim_chars: int = 500      # Kept for config compatibility; recent tool results remain intact
-    max_tool_result_chars: int = 2000  # Hard limit for any single tool result
+    keep_recent_turns: int = 3      # Keep tool results from the last N user turns
+    max_tool_result_chars: int = 0  # 0 = no truncation for recent results
+
+
+def _group_into_turns(messages: list[dict]) -> list[list[int]]:
+    """Group tool result indices by user turn.
+
+    A turn starts at each user message. Tool results between two user
+    messages belong to the same turn.
+
+    Returns list of groups, each group is a list of indices of tool results.
+    """
+    groups: list[list[int]] = []
+    current_group: list[int] = []
+
+    for i, msg in enumerate(messages):
+        if msg.get("role") == "user":
+            # New user turn starts — flush previous group
+            if current_group:
+                groups.append(current_group)
+                current_group = []
+        if msg.get("role") == "tool":
+            current_group.append(i)
+
+    # Flush last group
+    if current_group:
+        groups.append(current_group)
+
+    return groups
 
 
 def prune_messages(
@@ -28,12 +57,11 @@ def prune_messages(
     """
     Prune old tool results from messages to reduce context size.
 
-    This is a pure function that returns a new list — it does NOT modify
-    the original messages or the on-disk session.
+    Pure function — returns a new list, does NOT modify original.
 
     Strategy:
-    1. Find all tool result messages and group them into "turns"
-    2. Tool results from the last N turns are kept intact
+    1. Group tool results by user turn
+    2. Tool results from the last N turns are kept INTACT (never truncated)
     3. Tool results older than N turns are replaced with a placeholder
     4. User and assistant messages are never modified
 
@@ -53,42 +81,38 @@ def prune_messages(
     if not messages:
         return []
 
-    # Find indices of all tool result messages
-    tool_result_indices = [
-        i for i, m in enumerate(messages) if m.get("role") == "tool"
-    ]
+    # Group tool results by turn
+    turn_groups = _group_into_turns(messages)
 
-    if not tool_result_indices:
+    if not turn_groups:
         return list(messages)
 
-    # Group tool results into turns.
-    # A turn boundary is when we see a user message between two tool results.
-    # Simple approach: count the number of tool calls/results; each = 1 turn.
-    # We treat each tool result as its own "turn" for simplicity.
-    total_tool_results = len(tool_result_indices)
-    keep_count = config.keep_recent_turns
+    # Determine which turns to keep
+    keep_turns = config.keep_recent_turns
+    recent_turn_count = min(keep_turns, len(turn_groups))
 
-    # Determine which tool results to keep vs clear
-    # Last keep_count tool results are "recent", rest are "old"
-    recent_indices = set(tool_result_indices[-keep_count:]) if keep_count > 0 else set()
-    old_indices = set(tool_result_indices[:-keep_count]) if keep_count < total_tool_results else set()
+    # All indices in recent turns → keep intact
+    recent_indices: set[int] = set()
+    for group in turn_groups[-recent_turn_count:]:
+        recent_indices.update(group)
+
+    # All other tool result indices → replace with placeholder
+    all_tool_indices: set[int] = set()
+    for group in turn_groups:
+        all_tool_indices.update(group)
+    old_indices = all_tool_indices - recent_indices
 
     # Build result list
     result = []
     for i, msg in enumerate(messages):
-        if msg.get("role") == "tool":
-            if i in old_indices:
-                # Hard clear: replace with placeholder
-                new_msg = copy.copy(msg)
-                new_msg["content"] = "[tool output removed - older than recent turns]"
-                result.append(new_msg)
-            elif i in recent_indices:
-                # Keep recent results intact so the next model turn can use the full tool output.
-                result.append(copy.copy(msg))
-            else:
-                result.append(copy.copy(msg))
+        if i in old_indices and msg.get("role") == "tool":
+            # Old tool result: replace content with placeholder
+            new_msg = copy.copy(msg)
+            new_msg["content"] = "[tool output removed]"
+            result.append(new_msg)
         else:
-            # User/assistant messages pass through unchanged
-            result.append(msg)
+            # Everything else passes through unchanged
+            # Recent tool results are kept INTACT — no truncation
+            result.append(copy.copy(msg) if i in recent_indices else msg)
 
     return result

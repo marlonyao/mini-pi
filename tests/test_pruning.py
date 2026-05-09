@@ -69,8 +69,7 @@ class TestPruningConfig:
         config = PruningConfig()
         assert config.enabled is True
         assert config.keep_recent_turns == 3
-        assert config.soft_trim_chars == 500
-        assert config.max_tool_result_chars == 2000
+        assert config.max_tool_result_chars == 0  # 0 = no truncation
 
     def test_disabled(self):
         config = PruningConfig(enabled=False)
@@ -136,33 +135,30 @@ class TestPruningBasicBehavior:
 
 
 class TestSoftTrim:
-    def test_oversized_recent_result_kept_intact(self):
-        """Recent tool results should stay complete for the next model turn."""
-        long_content = "A" * 800  # longer than soft_trim_chars=500
+    def test_recent_tool_results_never_truncated(self):
+        """Recent tool results should stay complete, no matter how long."""
+        long_content = "A" * 8000  # very long
         messages = [
             make_user("do something"),
             make_assistant("", [make_tool_call("c1", "bash")]),
             make_tool_result("c1", long_content),
             make_assistant("done"),
         ]
-        config = PruningConfig(
-            keep_recent_turns=3,
-            soft_trim_chars=200,
-        )
+        config = PruningConfig(keep_recent_turns=3)
         result = prune_messages(messages, config)
 
         tool_msg = [m for m in result if m["role"] == "tool"][0]
         assert tool_msg["content"] == long_content
 
-    def test_small_result_not_trimmed(self):
-        """Tool results within soft_trim_chars should not be touched."""
+    def test_small_result_not_touched(self):
+        """Short tool results should pass through unchanged."""
         messages = [
             make_user("do something"),
             make_assistant("", [make_tool_call("c1", "bash")]),
             make_tool_result("c1", "short output"),
             make_assistant("done"),
         ]
-        config = PruningConfig(soft_trim_chars=500)
+        config = PruningConfig()
         result = prune_messages(messages, config)
 
         tool_msg = [m for m in result if m["role"] == "tool"][0]
