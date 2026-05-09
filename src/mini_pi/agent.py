@@ -42,19 +42,16 @@ class Agent:
         self.tools = get_openai_tools()
         self.system_prompt = build_system_prompt(cwd=config.cwd)
 
-        # Skill support
+        # Skill support (Progressive Disclosure)
+        # Only load skill catalog (name + description) at startup.
+        # Full SKILL.md is loaded on-demand by LLM via `read` tool.
         self.skill_manager = SkillManager(skill_dirs=config.skill_dirs)
         self.skill_manager.discover()
 
-        # Add skill tools to the tool list
-        skill_tools = self.skill_manager.get_all_tools()
-        if skill_tools:
-            self.tools.extend(skill_tools)
-
-        # Build system prompt with skill context
-        skill_addition = self.skill_manager.build_skill_prompt_addition()
-        if skill_addition:
-            self.system_prompt += skill_addition
+        # Inject lightweight skill catalog into system prompt
+        skill_catalog = self.skill_manager.format_skills_for_prompt()
+        if skill_catalog:
+            self.system_prompt += skill_catalog
 
         # Compaction support
         self.compactor = Compactor(config.compaction, client=self.client)

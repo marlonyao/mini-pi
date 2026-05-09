@@ -1,13 +1,23 @@
 """
-Skill framework for mini-pi.
+Skill framework for mini-pi (v2 — Progressive Disclosure).
 
-Skills are directories containing a SKILL.md (required) and optional tools.py.
-They provide domain-specific knowledge and tools that the agent can use.
+Follows the Agent Skills standard (https://agentskills.io/specification).
+Inspired by Pi's implementation: LLM decides which skill to use,
+then uses the `read` tool to load full instructions on-demand.
+
+Key changes from v1:
+- Only name + description + file_path are loaded at startup (Tier 1: Catalog)
+- Full SKILL.md is NOT injected into system prompt
+- System prompt only gets a lightweight XML catalog of available skills
+- LLM uses the `read` tool to load SKILL.md when needed (Tier 2: Instructions)
+- No keyword matching — LLM decides relevance autonomously
+- Skill tools are NOT pre-registered; they load on demand
+- Supports YAML frontmatter parsing (name, description fields)
 
 Directory structure:
   skills/
   └── my-skill/
-      ├── SKILL.md          # Required: skill description and instructions
+      ├── SKILL.md          # Required: frontmatter (name, description) + instructions
       ├── tools.py          # Optional: additional tool definitions
       └── references/       # Optional: reference docs, examples
 """
@@ -15,30 +25,30 @@ Directory structure:
 from __future__ import annotations
 
 import importlib.util
-import sys
-from dataclasses import dataclass, field
+import re
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
-
-from pydantic import BaseModel
-
-from .tools import TOOL_DEFINITIONS
 
 
 @dataclass
 class Skill:
-    """A skill is a directory with a SKILL.md and optional tools."""
+    """A skill is a directory with a SKILL.md.
+
+    Only metadata is loaded at startup. The full SKILL.md body
+    is read on-demand by the agent via the `read` tool.
+    """
 
     name: str
-    description: str              # First line / heading from SKILL.md
+    description: str
     skill_dir: Path
-    skill_md_content: str         # Full SKILL.md content
+    skill_md_path: Path  # Absolute path for the `read` tool
 
     @classmethod
     def from_dir(cls, skill_dir: Path | str) -> Skill | None:
         """
-        Load a skill from a directory.
+        Load skill metadata from a directory.
 
+        Only reads frontmatter (name + description), NOT the full body.
         Returns None if the directory doesn't exist or has no SKILL.md.
         """
         skill_dir = Path(skill_dir)
@@ -50,29 +60,38 @@ class Skill:
             return None
 
         content = skill_md.read_text(encoding="utf-8")
-        # Extract description from first heading
-        description = ""
-        for line in content.splitlines():
-            line = line.strip()
-            if line.startswith("# "):
-                description = line[2:].strip()
-                break
+
+        # Parse YAML frontmatter
+        name, description = _parse_frontmatter(content)
+
+        # Fallback: extract description from first heading if no frontmatter
+        if not description:
+            for line in content.splitlines():
+                line = line.strip()
+                if line.startswith("# "):
+                    description = line[2:].strip()
+                    break
+
+        # Must have a description to be useful
+        if not description or not description.strip():
+            return None
+
+        # Use directory name as fallback for skill name
+        if not name:
+            name = skill_dir.name
 
         return cls(
-            name=skill_dir.name,
-            description=description,
+            name=name,
+            description=description.strip(),
             skill_dir=skill_dir,
-            skill_md_content=content,
+            skill_md_path=skill_md.resolve(),
         )
-
-    def system_prompt_addition(self) -> str:
-        """Get the content to inject into the system prompt when this skill is active."""
-        return self.skill_md_content
 
     def load_tools(self) -> list[dict]:
         """
         Load tool definitions from tools.py if it exists.
 
+        Called only when the skill is activated, not at startup.
         Returns a list of OpenAI-compatible tool definitions.
         """
         tools_py = self.skill_dir / "tools.py"
@@ -80,7 +99,6 @@ class Skill:
             return []
 
         try:
-            # Dynamically import the tools module
             spec = importlib.util.spec_from_file_location(
                 f"skill_{self.name}_tools",
                 tools_py,
@@ -91,14 +109,15 @@ class Skill:
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
 
-            # Look for TOOL_DEFINITIONS dict
             if not hasattr(module, "TOOL_DEFINITIONS"):
                 return []
 
             defs = module.TOOL_DEFINITIONS
             tools = []
-            for tool_name, (params_model, handler) in defs.items():
-                # Convert Pydantic model to OpenAI function tool format
+            for tool_name, (params_model, _handler) in defs.items():
+                from pydantic import BaseModel
+                if not issubclass(params_model, BaseModel):
+                    continue
                 schema = params_model.model_json_schema()
                 tools.append({
                     "type": "function",
@@ -115,9 +134,56 @@ class Skill:
             return []
 
 
+def _parse_frontmatter(content: str) -> tuple[str, str]:
+    """Parse YAML frontmatter from SKILL.md content.
+
+    Returns (name, description). Either may be empty string.
+    Handles common YAML formatting issues (unquoted colons, etc.)
+    """
+    name = ""
+    description = ""
+
+    # Match frontmatter between --- delimiters
+    match = re.match(r"^---\s*\n(.*?)\n---", content, re.DOTALL)
+    if not match:
+        return name, description
+
+    yaml_block = match.group(1)
+
+    for line in yaml_block.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+
+        # Simple key: value parsing (handles common YAML)
+        colon_idx = line.find(":")
+        if colon_idx < 1:
+            continue
+
+        key = line[:colon_idx].strip().lower()
+        value = line[colon_idx + 1:].strip()
+
+        # Remove surrounding quotes if present
+        if (value.startswith('"') and value.endswith('"')) or \
+           (value.startswith("'") and value.endswith("'")):
+            value = value[1:-1]
+
+        if key == "name":
+            name = value
+        elif key == "description":
+            description = value
+
+    return name, description
+
+
 class SkillManager:
     """
     Discovers and manages skills from configured directories.
+
+    Uses Progressive Disclosure:
+    - Tier 1 (Catalog): name + description loaded at startup → injected into system prompt
+    - Tier 2 (Instructions): full SKILL.md loaded on-demand by LLM via `read` tool
+    - Tier 3 (Resources): scripts/references loaded when instructions reference them
     """
 
     def __init__(self, skill_dirs: list[str] | None = None):
@@ -126,12 +192,9 @@ class SkillManager:
         self._discovered = False
 
     def discover(self) -> list[Skill]:
-        """
-        Scan skill directories and load all valid skills.
-
-        Returns the list of discovered skills.
-        """
+        """Scan skill directories and load metadata (name + description only)."""
         self._skills = []
+        seen_names: set[str] = set()
 
         for dir_path in self.skill_dirs:
             path = Path(dir_path)
@@ -139,10 +202,14 @@ class SkillManager:
                 continue
 
             for entry in sorted(path.iterdir()):
-                if entry.is_dir():
-                    skill = Skill.from_dir(entry)
-                    if skill is not None:
+                if not entry.is_dir():
+                    continue
+                skill = Skill.from_dir(entry)
+                if skill is not None:
+                    # Handle name collisions: first found wins
+                    if skill.name not in seen_names:
                         self._skills.append(skill)
+                        seen_names.add(skill.name)
 
         self._discovered = True
         return self._skills
@@ -161,85 +228,45 @@ class SkillManager:
             self.discover()
         return self._skills
 
-    def match(self, user_message: str) -> Skill | None:
+    def format_skills_for_prompt(self) -> str:
         """
-        Find the most relevant skill for a user message.
+        Build a lightweight XML catalog for the system prompt.
 
-        Uses simple keyword matching against skill names and descriptions.
-        Returns None if no skill matches.
-        """
-        message_lower = user_message.lower()
+        This follows the Agent Skills standard format.
+        Only includes name + description + file location (Tier 1).
+        The LLM reads the full SKILL.md via the `read` tool when needed (Tier 2).
 
-        best_match: Skill | None = None
-        best_score = 0
-
-        for skill in self.skills:
-            score = self._match_score(skill, message_lower)
-            if score > best_score:
-                best_score = score
-                best_match = skill
-
-        # Require minimum score to avoid false matches
-        return best_match if best_score >= 1 else None
-
-    def _match_score(self, skill: Skill, message_lower: str) -> int:
-        """Calculate a simple match score for a skill against a message."""
-        score = 0
-
-        # Check skill name keywords
-        name_words = skill.name.replace("-", " ").split()
-        for word in name_words:
-            if word in message_lower or message_lower in word:
-                score += 2
-            # Stem matching: "test" matches "testing"
-            elif len(word) >= 4 and word[:4] in message_lower:
-                score += 1
-
-        # Check description keywords
-        desc_words = skill.description.lower().split()
-        for word in desc_words:
-            word = word.strip("#:-.,")
-            if len(word) > 2 and (word in message_lower or message_lower in word):
-                score += 1
-            elif len(word) >= 4 and word[:4] in message_lower:
-                score += 1
-
-        # Check SKILL.md content for "Use when:" patterns
-        content_lower = skill.skill_md_content.lower()
-        if "use when:" in content_lower:
-            for line in skill.skill_md_content.splitlines():
-                if "use when:" in line.lower():
-                    condition = line.lower().split("use when:", 1)[1]
-                    condition_words = condition.replace(",", " ").split()
-                    for word in condition_words:
-                        word = word.strip(". ")
-                        if len(word) > 2 and word in message_lower:
-                            score += 3
-
-        return score
-
-    def get_all_tools(self) -> list[dict]:
-        """Get OpenAI tool definitions from all skills that have tools."""
-        tools = []
-        for skill in self.skills:
-            tools.extend(skill.load_tools())
-        return tools
-
-    def build_skill_prompt_addition(self) -> str:
-        """
-        Build a system prompt addition with all skill descriptions.
-
-        This lets the agent know what skills are available.
+        Token cost: ~50-100 tokens per skill (vs thousands for full content).
         """
         if not self.skills:
             return ""
 
-        parts = ["\n\n# Available Skills\n"]
-        parts.append("When the user's request matches a skill, read and follow its instructions.\n")
+        lines = [
+            "\n\nThe following skills provide specialized instructions for specific tasks.",
+            "Use the read tool to load a skill's file when the task matches its description.",
+            "When a skill file references a relative path, resolve it against the skill directory.",
+            "",
+            "<available_skills>",
+        ]
 
         for skill in self.skills:
-            parts.append(f"## {skill.description}\n")
-            parts.append(skill.skill_md_content)
-            parts.append("")
+            lines.append("  <skill>")
+            lines.append(f"    <name>{_escape_xml(skill.name)}</name>")
+            lines.append(f"    <description>{_escape_xml(skill.description)}</description>")
+            lines.append(f"    <location>{_escape_xml(str(skill.skill_md_path))}</location>")
+            lines.append("  </skill>")
 
-        return "\n".join(parts)
+        lines.append("</available_skills>")
+        return "\n".join(lines)
+
+
+def _escape_xml(text: str) -> str:
+    """Escape special XML characters."""
+    return (
+        text
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&apos;")
+    )

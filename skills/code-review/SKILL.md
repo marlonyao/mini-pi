@@ -1,3 +1,8 @@
+---
+name: code-review
+description: Review source code for bugs, quality issues, and improvements. Use when user asks to review code, check code quality, or find bugs.
+---
+
 # Code Review Skill
 
 Use when: user asks to review code, check code quality, or find bugs in code.
