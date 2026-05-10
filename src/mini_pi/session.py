@@ -1,10 +1,19 @@
 """
 Session management for mini-pi.
 
-Sessions are stored as JSONL files (one JSON object per line).
+Sessions are stored as append-only JSONL files (one JSON object per line).
 Each entry records a message with role, content, and optional tool call data.
 
-Inspired by Pi's tree-structured sessions — this is a simplified linear version.
+The JSONL is append-only — new messages are always appended, never overwritten.
+This preserves full conversation history even after compaction.
+
+Entry types:
+  - meta:       Session metadata (created_at, etc.)
+  - message:    A single message (user/assistant/tool)
+  - snapshot:   A compaction checkpoint (contains the compacted message list)
+
+Loading reads from the last snapshot forward, so only the active messages
+are in memory, while the full history remains on disk.
 """
 
 from __future__ import annotations
@@ -17,7 +26,7 @@ from typing import Any
 
 
 class Session:
-    """Manages conversation history with JSONL persistence."""
+    """Manages conversation history with append-only JSONL persistence."""
 
     def __init__(self, path: Path | None = None):
         self.path = path
@@ -25,25 +34,67 @@ class Session:
         self.created_at = datetime.now().isoformat()
         self.token_usage = {"prompt": 0, "completion": 0, "total": 0}
 
+        # Track how many messages have been persisted to disk.
+        # Only messages beyond this index need to be appended on save().
+        self._persisted_count: int = 0
+
         if path and path.exists():
             self._load()
 
     def _load(self) -> None:
-        """Load session from JSONL file."""
-        for line in self.path.read_text(encoding="utf-8").splitlines():
+        """
+        Load session from JSONL file.
+
+        Reads the entire file to find the last snapshot and session metadata,
+        then loads only messages after the last snapshot into self.messages.
+        """
+        last_snapshot_index = -1
+        lines: list[str] = []
+
+        for line_no, line in enumerate(self.path.read_text(encoding="utf-8").splitlines()):
             line = line.strip()
-            if line:
-                entry = json.loads(line)
-                if entry.get("type") == "message":
-                    self.messages.append(entry["data"])
-                elif entry.get("type") == "meta":
-                    self.created_at = entry.get("created_at", self.created_at)
+            if not line:
+                continue
+            lines.append(line)
+            entry = json.loads(line)
+            if entry.get("type") == "meta":
+                self.created_at = entry.get("created_at", self.created_at)
+                # Restore compaction state from meta
+                if "compaction_count" in entry:
+                    self._compaction_count = entry["compaction_count"]
+            elif entry.get("type") == "snapshot":
+                last_snapshot_index = len(lines) - 1
+
+        # Load messages: from last snapshot forward
+        start = last_snapshot_index + 1 if last_snapshot_index >= 0 else 0
+        self.messages = []
+        for line in lines[start:]:
+            entry = json.loads(line)
+            if entry.get("type") == "message":
+                self.messages.append(entry["data"])
+
+        # Also load snapshot messages if there was a snapshot
+        if last_snapshot_index >= 0:
+            snapshot_entry = json.loads(lines[last_snapshot_index])
+            snapshot_messages = snapshot_entry.get("messages", [])
+            self.messages = snapshot_messages + self.messages
+
+            # Restore compaction summary
+            if "summary" in snapshot_entry:
+                self._last_compaction_summary = snapshot_entry["summary"]
+
+        # All loaded messages are considered persisted
+        self._persisted_count = len(self.messages)
 
     def record_compaction(self, result: "CompactResult") -> None:
-        """Record a compaction event in the session.
+        """
+        Record a compaction event by appending a snapshot to the JSONL.
 
-        Replaces older messages with the summary + recent tail.
-        Full history is preserved in the JSONL before this point.
+        The snapshot contains the compacted message list. The full history
+        remains in the JSONL file before this snapshot entry — nothing is
+        overwritten.
+
+        After calling this, save() will append the snapshot to disk.
         """
         if not result.success:
             return
@@ -57,45 +108,83 @@ class Session:
         # Get recent messages from the result
         recent = getattr(result, "_recent_messages", [])
 
-        # Replace messages: summary + recent
+        # Replace in-memory messages: summary + recent
         self.messages = [summary_msg] + list(recent)
 
         # Track compaction count
         self._compaction_count = getattr(self, "_compaction_count", 0) + 1
-        # Store latest summary for incremental updates
         self._last_compaction_summary = result.summary
 
+        # Write snapshot immediately (append-only)
+        self._append_snapshot(result.summary)
+
     def save(self) -> None:
-        """Persist session to JSONL file."""
+        """
+        Persist new messages to JSONL file (append-only).
+
+        Only appends messages that haven't been written to disk yet.
+        Never overwrites existing content.
+        """
         if not self.path:
             return
 
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        lines: list[str] = []
 
-        # Meta entry
-        meta = {
+        is_new = not self.path.exists()
+
+        with open(self.path, "a", encoding="utf-8") as f:
+            if is_new:
+                # Write meta entry for new sessions
+                meta = {
+                    "type": "meta",
+                    "created_at": self.created_at,
+                    "saved_at": datetime.now().isoformat(),
+                }
+                if hasattr(self, "_compaction_count") and self._compaction_count:
+                    meta["compaction_count"] = self._compaction_count
+                f.write(json.dumps(meta) + "\n")
+
+            # Append only new messages (beyond _persisted_count)
+            for msg in self.messages[self._persisted_count:]:
+                f.write(json.dumps({"type": "message", "data": msg}) + "\n")
+
+        self._persisted_count = len(self.messages)
+
+    def _append_snapshot(self, summary: str) -> None:
+        """
+        Append a compaction snapshot to the JSONL file.
+
+        The snapshot captures the current compacted message list.
+        On next load(), messages before this snapshot are skipped.
+        """
+        if not self.path:
+            return
+
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Update meta with current compaction count
+        meta_update = {
             "type": "meta",
             "created_at": self.created_at,
             "saved_at": datetime.now().isoformat(),
         }
         if hasattr(self, "_compaction_count") and self._compaction_count:
-            meta["compaction_count"] = self._compaction_count
-        lines.append(json.dumps(meta))
+            meta_update["compaction_count"] = self._compaction_count
 
-        # Compaction entry (if any)
+        snapshot = {
+            "type": "snapshot",
+            "messages": self.messages,
+            "summary": summary,
+            "saved_at": datetime.now().isoformat(),
+        }
         if hasattr(self, "_compaction_count") and self._compaction_count:
-            lines.append(json.dumps({
-                "type": "compaction",
-                "count": self._compaction_count,
-                "saved_at": datetime.now().isoformat(),
-            }))
+            snapshot["compaction_count"] = self._compaction_count
 
-        # Message entries
-        for msg in self.messages:
-            lines.append(json.dumps({"type": "message", "data": msg}))
+        with open(self.path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(meta_update) + "\n")
+            f.write(json.dumps(snapshot) + "\n")
 
-        self.path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self._persisted_count = len(self.messages)
 
     def add(self, role: str, content: str | None = None, **kwargs: Any) -> dict:
         """Add a message and return it."""
