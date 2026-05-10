@@ -106,17 +106,21 @@ def tool_bash(params: BashParams, *, timeout: int = 30, cwd: str = "") -> str:
             params.command,
             shell=True,
             stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+            stderr=subprocess.PIPE,
             cwd=str(path_obj),
         )
 
         # Read output in a thread so we can enforce timeout
-        output_lines: list[str] = []
+        stdout_lines: list[str] = []
+        stderr_lines: list[str] = []
 
         def _read():
             assert proc.stdout is not None
+            assert proc.stderr is not None
             for line in proc.stdout:
-                output_lines.append(line.decode("utf-8", errors="replace"))
+                stdout_lines.append(line.decode("utf-8", errors="replace"))
+            for line in proc.stderr:
+                stderr_lines.append(line.decode("utf-8", errors="replace"))
 
         reader = threading.Thread(target=_read, daemon=True)
         reader.start()
@@ -127,7 +131,7 @@ def tool_bash(params: BashParams, *, timeout: int = 30, cwd: str = "") -> str:
             proc.kill()
             proc.wait()
             reader.join(timeout=2)
-            full = "".join(output_lines)
+            full = "".join(stdout_lines)
             result = truncate_tail(full)
             output = result["content"]
             if result["truncated"]:
@@ -136,12 +140,23 @@ def tool_bash(params: BashParams, *, timeout: int = 30, cwd: str = "") -> str:
             return output
 
         reader.join(timeout=2)
-        full = "".join(output_lines)
-        result = truncate_tail(full)
 
+        # Build output
+        stdout_full = "".join(stdout_lines)
+        stderr_full = "".join(stderr_lines)
+
+        result = truncate_tail(stdout_full)
         output = result["content"]
         if result["truncated"]:
             output += f"\n\n[Showing last {result['output_lines']} of {result['total_lines']} lines ({format_size(DEFAULT_MAX_BYTES)} limit)]"
+
+        # Append stderr if present
+        if stderr_full.strip():
+            stderr_trunc = truncate_tail(stderr_full)
+            stderr_output = stderr_trunc["content"]
+            if stderr_trunc["truncated"]:
+                stderr_output += "\n[stderr truncated]"
+            output += f"\n\n--- stderr ---\n{stderr_output}"
 
         if proc.returncode != 0:
             output += f"\n\nExit code: {proc.returncode}"
@@ -236,6 +251,10 @@ def tool_edit(params: EditParams, *, cwd: str = "") -> str:
     Supports both:
     - old_text + new_text (single replacement, backward compat)
     - edits[] (multiple replacements in one call)
+
+    Features:
+    - Fuzzy matching: normalizes whitespace/unicode for close matches
+    - Diff preview: shows unified diff of changes
     """
     path = _resolve(params.path, cwd)
 
@@ -269,16 +288,23 @@ def tool_edit(params: EditParams, *, cwd: str = "") -> str:
                 label = f"edits[{i}].old_text" if len(edits) > 1 else "old_text"
                 return f"Error: {label} must not be empty in {path}"
 
-            idx = content.find(old)
+            # Try exact match first
+            idx = original.find(old)
+            used_fuzzy = False
+
             if idx == -1:
-                # Try in original (non-shifted) content
-                idx = original.find(old)
-                if idx == -1:
-                    label = f"edits[{i}]" if len(edits) > 1 else "the text"
-                    return (
-                        f"Error: Could not find {label} in {path}. "
-                        f"The old text must match exactly including whitespace and newlines."
-                    )
+                # Try fuzzy match: normalize whitespace/unicode
+                idx, match_len = _fuzzy_find(original, old)
+                if idx >= 0:
+                    used_fuzzy = True
+                    matches.append((idx, idx + match_len, new))
+                    continue
+
+                label = f"edits[{i}]" if len(edits) > 1 else "the text"
+                return (
+                    f"Error: Could not find {label} in {path}. "
+                    f"The old text must match exactly including whitespace and newlines."
+                )
 
             # Check uniqueness
             count = original.count(old)
@@ -308,8 +334,18 @@ def tool_edit(params: EditParams, *, cwd: str = "") -> str:
         if result == original:
             return f"Error: No changes made to {path}. Check that old_text differs from new_text."
 
+        # Generate unified diff
+        diff = _unified_diff(original, result, str(path))
+
+        # Count changes
+        changed_lines = sum(1 for l in diff.splitlines() if l.startswith('+') and not l.startswith('+++'))
+
         path.write_text(result, encoding="utf-8")
-        return f"✅ Edited {path} (replaced {len(matches)} block(s))"
+
+        output = f"✅ Edited {path} (replaced {len(matches)} block(s), ~{changed_lines} lines changed)"
+        if diff:
+            output += "\n" + diff
+        return output
 
     except Exception as e:
         return f"Error editing file: {e}"
@@ -594,3 +630,140 @@ def _resolve(path_str: str, cwd: str) -> Path:
     if p.is_absolute():
         return p
     return Path(cwd) / p if cwd else p
+
+
+# ── Edit helpers ────────────────────────────────────────────────────
+
+def _normalize_for_fuzzy(text: str) -> str:
+    """Normalize text for fuzzy matching."""
+    import unicodedata
+
+    # NFKC normalization (compatibility decomposition)
+    text = unicodedata.normalize("NFKC", text)
+
+    # Strip trailing whitespace per line
+    text = "\n".join(line.rstrip() for line in text.splitlines())
+
+    # Normalize line endings
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+
+    return text
+
+
+def _fuzzy_find(content: str, search: str) -> tuple[int, int]:
+    """
+    Try to find search text in content using fuzzy matching.
+
+    Strategies (in order):
+    1. Exact match (fast path)
+    2. CRLF → LF normalization
+    3. Line-by-line trailing whitespace strip + CRLF normalization
+
+    Returns (index, length) in original content, or (-1, 0) if not found.
+    """
+    if not search:
+        return -1, 0
+
+    # Strategy 1: Exact match
+    idx = content.find(search)
+    if idx >= 0:
+        return idx, len(search)
+
+    # Strategy 2: CRLF normalization
+    norm_content = content.replace("\r\n", "\n").replace("\r", "\n")
+    norm_search = search.replace("\r\n", "\n").replace("\r", "\n")
+    idx = norm_content.find(norm_search)
+    if idx >= 0:
+        # Map back: count how many \r were before this position
+        orig_idx = _map_norm_to_orig(content, idx)
+        orig_end = _map_norm_to_orig(content, idx + len(norm_search))
+        return orig_idx, orig_end - orig_idx
+
+    # Strategy 3: Strip trailing whitespace per line
+    stripped_content = "\n".join(line.rstrip() for line in content.splitlines())
+    stripped_search = "\n".join(line.rstrip() for line in search.splitlines())
+    stripped_norm_content = stripped_content.replace("\r\n", "\n").replace("\r", "\n")
+    stripped_norm_search = stripped_search.replace("\r\n", "\n").replace("\r", "\n")
+
+    sidx = stripped_norm_content.find(stripped_norm_search)
+    if sidx == -1:
+        return -1, 0
+
+    # Approximate mapping: find the matching region in original content
+    # by comparing line by line
+    return _fuzzy_find_by_lines(content, search)
+
+
+def _map_norm_to_orig(content: str, norm_pos: int) -> int:
+    """Map a position in CRLF-normalized content back to original content."""
+    orig_pos = 0
+    count = 0
+    while orig_pos < len(content) and count < norm_pos:
+        if content[orig_pos] == "\r" and orig_pos + 1 < len(content) and content[orig_pos + 1] == "\n":
+            orig_pos += 2
+            count += 1  # \r\n → \n counts as 1
+        elif content[orig_pos] == "\r":
+            orig_pos += 1
+            count += 1  # \r → \n counts as 1
+        else:
+            orig_pos += 1
+            count += 1
+    return orig_pos
+
+
+def _fuzzy_find_by_lines(content: str, search: str) -> tuple[int, int]:
+    """
+    Find search in content by matching line-by-line with trailing whitespace stripped.
+
+    Returns (start_idx, length) in original content.
+    """
+    content_lines = content.splitlines(True)  # keep line endings
+    search_lines = search.splitlines(True)
+
+    # Strip for comparison
+    content_stripped = [l.strip() for l in content.splitlines()]
+    search_stripped = [l.strip() for l in search.splitlines()]
+
+    if not search_stripped:
+        return -1, 0
+
+    # Find first line match
+    for start_line in range(len(content_stripped) - len(search_stripped) + 1):
+        match = True
+        for j, search_line in enumerate(search_stripped):
+            if content_stripped[start_line + j] != search_line:
+                match = False
+                break
+        if match:
+            # Map back to original positions
+            orig_start = sum(len(l) for l in content_lines[:start_line])
+            orig_end = sum(len(l) for l in content_lines[:start_line + len(search_lines)])
+            return orig_start, orig_end - orig_start
+
+    return -1, 0
+
+
+def _unified_diff(old: str, new: str, path: str, context: int = 3) -> str:
+    """Generate a unified diff between old and new content."""
+    import difflib
+
+    old_lines = old.splitlines(keepends=True)
+    new_lines = new.splitlines(keepends=True)
+
+    diff = list(difflib.unified_diff(
+        old_lines,
+        new_lines,
+        fromfile=f"{path} (before)",
+        tofile=f"{path} (after)",
+        n=context,
+    ))
+
+    if not diff:
+        return ""
+
+    # Truncate diff if too long (max 100 lines)
+    if len(diff) > 100:
+        diff = diff[:100]
+        diff.append("... (diff truncated)\n")
+
+    return "".join(diff).rstrip()
