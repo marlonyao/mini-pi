@@ -300,6 +300,7 @@ class ModelRegistry:
         providers = data.get("providers", {})
         for prov_name, prov_data in providers.items():
             if prov_name not in self._providers:
+                # New provider — add as-is
                 self._providers[prov_name] = prov_data
             else:
                 existing = self._providers[prov_name]
@@ -308,6 +309,10 @@ class ModelRegistry:
                     existing["api_key_env"] = prov_data["api_key_env"]
                 if "base_url" in prov_data:
                     existing["base_url"] = prov_data["base_url"]
+                if "api_key" in prov_data:
+                    existing["api_key"] = prov_data["api_key"]
+                if "headers" in prov_data:
+                    existing["headers"] = prov_data["headers"]
                 # Merge models
                 if "models" in prov_data:
                     existing.setdefault("models", {}).update(prov_data["models"])
@@ -358,8 +363,11 @@ class ModelRegistry:
         model_data: dict[str, Any],
     ) -> ModelInfo:
         """Build ModelInfo from config data."""
-        api_key_env = prov_data.get("api_key_env", "OPENAI_API_KEY")
-        api_key = os.getenv(api_key_env, "")
+        # API key: config file > environment variable
+        api_key = prov_data.get("api_key", "")
+        if not api_key:
+            api_key_env = prov_data.get("api_key_env", "OPENAI_API_KEY")
+            api_key = os.getenv(api_key_env, "")
         base_url = prov_data.get("base_url", "https://api.openai.com/v1")
 
         return ModelInfo(
@@ -381,7 +389,8 @@ class ModelRegistry:
         result = []
         for prov_name, prov_data in sorted(self._providers.items()):
             api_key_env = prov_data.get("api_key_env", "OPENAI_API_KEY")
-            api_key_set = bool(os.getenv(api_key_env))
+            # Check key from config file or environment variable
+            api_key_set = bool(prov_data.get("api_key")) or bool(os.getenv(api_key_env))
             base_url = prov_data.get("base_url", "")
 
             for model_name, model_data in sorted(prov_data.get("models", {}).items()):

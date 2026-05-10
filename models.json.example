@@ -1,0 +1,25 @@
+{
+  "default": "zhipu/glm-5.1",
+
+  "providers": {
+    "zhipu": {
+      "api_key": "YOUR_ZHIPU_API_KEY"
+    },
+    "zai": {
+      "api_key": "YOUR_ZAI_API_KEY"
+    },
+    "kimi": {
+      "api_key": "YOUR_KIMI_API_KEY"
+    },
+    "kimi-coding": {
+      "api_key": "YOUR_KIMI_CODING_API_KEY"
+    },
+    "deepseek": {
+      "api_key": "YOUR_DEEPSEEK_API_KEY"
+    },
+    "openai": {
+      "api_key": "YOUR_OPENAI_API_KEY",
+      "base_url": "https://your-proxy.example.com/v1"
+    }
+  }
+}
