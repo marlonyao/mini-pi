@@ -56,14 +56,17 @@ class OpenAILLM(LLMBase):
         **kwargs: Any,
     ) -> ChatResponse:
         """Streaming implementation — assembles deltas into a complete response."""
-        stream = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            tools=tools,
-            temperature=0,
-            stream=True,
-            **kwargs,
-        )
+        # Build call kwargs — kwargs may override defaults
+        call_kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "tools": tools,
+            "temperature": 0,
+            "stream": True,
+        }
+        call_kwargs.update(kwargs)  # kwargs overrides defaults
+
+        stream = self.client.chat.completions.create(**call_kwargs)
 
         text_parts: list[str] = []
         reasoning_parts: list[str] = []
@@ -153,13 +156,15 @@ class OpenAILLM(LLMBase):
         **kwargs: Any,
     ) -> ChatResponse:
         """Non-streaming fallback."""
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            tools=tools,
-            temperature=0,
-            **kwargs,
-        )
+        call_kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "tools": tools,
+            "temperature": 0,
+        }
+        call_kwargs.update(kwargs)
+
+        response = self.client.chat.completions.create(**call_kwargs)
 
         msg = response.choices[0].message
         content = msg.content or ""
