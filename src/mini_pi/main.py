@@ -21,6 +21,7 @@ from rich.panel import Panel
 
 from .agent import Agent
 from .config import Config
+from .llm import OpenAILLM
 from .session import Session, create_session, list_sessions
 
 console = Console()
@@ -155,12 +156,25 @@ def main() -> None:
 
 def _print_banner(config: Config) -> None:
     """Print startup banner."""
+    model_info = config.get_current_model_info()
+    if model_info:
+        model_display = f"{model_info.provider}/{model_info.model}"
+        ctx = f"{model_info.max_context_tokens // 1000}K"
+    else:
+        model_display = config.model
+        ctx = "?"
+
+    # Show available providers
+    available = config.model_registry.list_available()
+    available_count = len(available)
+
     console.print(Panel.fit(
-        f"[bold cyan]mini-pi[/bold cyan] [dim]v0.2.0[/dim]\n"
-        f"Model: [green]{config.model}[/green]\n"
+        f"[bold cyan]mini-pi[/bold cyan] [dim]v0.3.0[/dim]\n"
+        f"Model: [green]{model_display}[/green] [dim]({ctx} ctx)[/dim]\n"
         f"CWD: [dim]{config.cwd}[/dim]\n"
+        f"Providers: [dim]{available_count} models available[/dim]\n"
         f"[dim]Streaming enabled ✨[/dim]\n"
-        f"Type [bold]exit[/bold] to quit, [bold]status[/bold] for info",
+        f"Type [bold]exit[/bold] to quit, [bold]/model[/bold] to switch, [bold]status[/bold] for info",
         title="🤖 Mini Pi",
         border_style="cyan",
     ))
@@ -194,6 +208,16 @@ def _repl(agent: Agent, config: Config) -> None:
             console.print("[dim]Bye! 👋[/dim]")
             break
 
+        # Handle /model command
+        if user_input.lower() == "/model" or user_input.lower().startswith("/model "):
+            _handle_model_command(agent, config, user_input)
+            continue
+
+        # Handle /models command (list all)
+        if user_input.lower() == "/models":
+            _handle_models_list(config)
+            continue
+
         if user_input.lower() == "clear":
             agent.session.messages.clear()
             console.print("[dim]Session cleared.[/dim]")
@@ -201,7 +225,12 @@ def _repl(agent: Agent, config: Config) -> None:
 
         if user_input.lower() == "status":
             usage = agent.session.token_usage
-            console.print(f"[dim]Messages: {len(agent.session.messages)} | "
+            model_info = config.get_current_model_info()
+            if model_info:
+                model_str = f"{model_info.provider}/{model_info.model}"
+            else:
+                model_str = config.model
+            console.print(f"[dim]Model: {model_str} | Messages: {len(agent.session.messages)} | "
                          f"Tokens: {usage['total']} (prompt: {usage['prompt']}, completion: {usage['completion']})[/dim]")
             continue
 
@@ -212,6 +241,91 @@ def _repl(agent: Agent, config: Config) -> None:
             console.print("\n[yellow]Interrupted.[/yellow]")
         except Exception as e:
             console.print(f"[red]Error: {e}[/red]")
+
+
+def _handle_model_command(agent: Agent, config: Config, user_input: str) -> None:
+    """Handle /model command — switch model or show current."""
+    parts = user_input.strip().split(maxsplit=1)
+
+    if len(parts) == 1:
+        # No arg: show current and available
+        model_info = config.get_current_model_info()
+        if model_info:
+            console.print(f"[green]Current: {model_info.provider}/{model_info.model}[/green]")
+        else:
+            console.print(f"[green]Current: {config.model}[/green]")
+        console.print("[dim]Usage: /model <provider/model> | /models to list all[/dim]")
+        return
+
+    model_spec = parts[1].strip()
+    _switch_model(agent, config, model_spec)
+
+
+def _switch_model(agent: Agent, config: Config, model_spec: str) -> None:
+    """Switch the agent to a different model."""
+    model_info = config.model_registry.resolve(model_spec)
+    if model_info is None:
+        console.print(f"[red]Unknown model: {model_spec}[/red]")
+        console.print("[dim]Use /models to see available models[/dim]")
+        return
+
+    if not model_info.api_key:
+        api_key_env = "?"
+        # Find the api_key_env for this provider
+        prov_data = config.model_registry._providers.get(model_info.provider, {})
+        api_key_env = prov_data.get("api_key_env", "API_KEY")
+        console.print(f"[red]API key not set for {model_info.provider}[/red]")
+        console.print(f"[dim]Set environment variable: [bold]{api_key_env}=<your-key>[/bold][/dim]")
+        return
+
+    # Update config
+    config._current_model_info = model_info
+    config.model = model_info.model
+
+    # Create new LLM instance
+    from .models import create_llm, get_model_extra_kwargs
+    agent.llm = create_llm(model_info)
+    agent._extra_kwargs = get_model_extra_kwargs(model_info)
+
+    # Update compactor client
+    if isinstance(agent.llm, OpenAILLM):
+        agent.compactor.client = agent.llm.client
+
+    # Update token estimator
+    agent.token_estimator.max_context_tokens = model_info.max_context_tokens
+
+    thinking_str = " [dim](thinking on)[/dim]" if model_info.thinking else ""
+    console.print(f"[green]Switched to {model_info.provider}/{model_info.model} ({model_info.max_context_tokens // 1000}K ctx){thinking_str}[/green]")
+
+
+def _handle_models_list(config: Config) -> None:
+    """List all configured models."""
+    all_models = config.model_registry.list_models()
+
+    if not all_models:
+        console.print("[dim]No models configured.[/dim]")
+        return
+
+    current_info = config.get_current_model_info()
+    current_spec = f"{current_info.provider}/{current_info.model}" if current_info else None
+
+    # Group by provider
+    by_provider: dict[str, list] = {}
+    for m in all_models:
+        by_provider.setdefault(m["provider"], []).append(m)
+
+    for prov_name, models in sorted(by_provider.items()):
+        console.print(f"\n[bold cyan]{prov_name}[/bold cyan]")
+        for m in models:
+            spec = m["spec"]
+            ctx = m["max_context_tokens"] // 1000
+            key_status = "🔑" if m["api_key_set"] else "❌"
+            thinking = " 🧠" if m["thinking"] else ""
+            current = " [green]← current[/green]" if spec == current_spec else ""
+            console.print(f"  {key_status} {spec} [dim]({ctx}K ctx){thinking}[/dim]{current}")
+
+    console.print("\n[dim]🔑 = API key set  ❌ = API key missing  🧠 = thinking mode[/dim]")
+    console.print("[dim]Use /model <provider/model> to switch[/dim]")
 
 
 def _run_streaming(agent: Agent, user_message: str) -> None:

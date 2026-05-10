@@ -20,6 +20,7 @@ from .compactor import Compactor, CompactionConfig
 from .config import Config
 from .context import prune_messages, PruningConfig
 from .llm import LLMBase, OpenAILLM
+from .models import create_llm
 from .session import Session
 from .skills import SkillManager
 from .system_prompt import build_system_prompt
@@ -34,18 +35,25 @@ class Agent:
         self.config = config
         self.session = session
 
-        # LLM abstraction — inject or create from config
+        # LLM abstraction — inject, resolve from registry, or legacy fallback
         if llm is not None:
             self.llm = llm
         else:
-            self.llm = OpenAILLM(
-                api_key=config.api_key,
-                base_url=config.base_url,
-                model=config.model,
-            )
+            model_info = config.get_current_model_info()
+            if model_info:
+                self.llm = create_llm(model_info)
+            else:
+                self.llm = OpenAILLM(
+                    api_key=config.api_key,
+                    base_url=config.base_url,
+                    model=config.model,
+                )
 
         self.tools = get_openai_tools()
         self.system_prompt = build_system_prompt(cwd=config.cwd)
+
+        # Provider-specific kwargs (thinking mode, temperature, etc.)
+        self._extra_kwargs = config.get_extra_kwargs()
 
         # Skill support (Progressive Disclosure)
         # Only load skill catalog (name + description) at startup.
@@ -90,12 +98,13 @@ class Agent:
                 *pruned,
             ]
 
-            # Call LLM via abstraction
+            # Call LLM via abstraction (with provider-specific kwargs)
             response = self.llm.chat(
                 messages=messages,
                 tools=self.tools,
                 on_text=self._on_text,
                 on_reasoning=self._on_reasoning,
+                **self._extra_kwargs,
             )
 
             # Track token usage
