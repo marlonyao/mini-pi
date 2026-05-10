@@ -18,12 +18,12 @@ from typing import Any
 # ── Project context file discovery ──────────────────────────────────
 
 # Files to look for in the project root (in order of priority)
+# NOTE: README.md intentionally excluded — LLM will read it on-demand via `read` tool
 CONTEXT_FILENAMES = [
     "AGENTS.md",
     "SYSTEM.md",
     "CLAUDE.md",       # Claude Code compat
     ".cursorrules",    # Cursor compat
-    "README.md",
 ]
 
 # Maximum size per context file (50KB)

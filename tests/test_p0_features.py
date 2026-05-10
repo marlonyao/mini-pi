@@ -33,25 +33,24 @@ class TestDiscoverContextFiles:
         assert results[0][0] == "AGENTS.md"
         assert "My Agent" in results[0][1]
 
-    def test_discovers_readme(self, tmp_path):
+    def test_does_not_discover_readme(self, tmp_path):
         (tmp_path / "README.md").write_text("# Project\nHello world")
         results = discover_context_files(str(tmp_path))
-        assert len(results) == 1
-        assert results[0][0] == "README.md"
+        assert len(results) == 0  # README intentionally excluded
 
     def test_discovers_multiple_files(self, tmp_path):
         (tmp_path / "AGENTS.md").write_text("agent rules")
-        (tmp_path / "README.md").write_text("project readme")
+        (tmp_path / "SYSTEM.md").write_text("system rules")
         results = discover_context_files(str(tmp_path))
         names = [r[0] for r in results]
         assert "AGENTS.md" in names
-        assert "README.md" in names
+        assert "SYSTEM.md" in names
         # AGENTS.md should come first (higher priority)
-        assert names.index("AGENTS.md") < names.index("README.md")
+        assert names.index("AGENTS.md") < names.index("SYSTEM.md")
 
-    def test_agents_md_priority_over_readme(self, tmp_path):
+    def test_agents_md_priority_over_system_md(self, tmp_path):
         (tmp_path / "AGENTS.md").write_text("agent")
-        (tmp_path / "README.md").write_text("readme")
+        (tmp_path / "SYSTEM.md").write_text("system")
         results = discover_context_files(str(tmp_path))
         assert results[0][0] == "AGENTS.md"
 
