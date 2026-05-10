@@ -11,6 +11,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 from typing import TextIO
@@ -363,6 +364,9 @@ def _handle_resume(agent: Agent, config: Config, user_input: str) -> None:
     msg_count = len(new_session.messages)
     console.print(f"[green]Resumed: {target['name']}[/green] [dim]({msg_count} messages)[/dim]")
 
+    # Show context summary so user knows what this session is about
+    _print_session_summary(new_session)
+
 
 def _handle_fork(agent: Agent, config: Config, user_input: str) -> None:
     """Handle /fork command — fork the current session."""
@@ -391,10 +395,74 @@ def _handle_sessions(config: Config) -> None:
     for i, s in enumerate(sessions[:20], 1):
         size_kb = s["size"] / 1024
         modified = s["modified"][:16]  # YYYY-MM-DDTHH:MM
-        console.print(f"  {i:>2}. [dim]{s['name']}[/dim]  [dim]({size_kb:.1f}KB, {modified})[/dim]")
+
+        # Try to get first user message as topic
+        topic = _get_session_topic(s["path"])
+        topic_str = f" — {topic}" if topic else ""
+
+        console.print(f"  {i:>2}. [dim]{s['name']}[/dim]  [dim]({size_kb:.1f}KB, {modified})[/dim][dim]{topic_str}[/dim]")
 
     if len(sessions) > 20:
         console.print(f"  [dim]... and {len(sessions) - 20} more[/dim]")
+
+
+def _get_session_topic(path: str, max_chars: int = 60) -> str | None:
+    """Extract the first user message from a session file as topic."""
+    try:
+        for line in Path(path).read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            entry = json.loads(line)
+            if entry.get("type") == "message":
+                data = entry.get("data", {})
+                if data.get("role") == "user" and data.get("content", "").strip():
+                    topic = data["content"].strip().replace("\n", " ")
+                    if len(topic) > max_chars:
+                        topic = topic[:max_chars - 3] + "..."
+                    return topic
+    except (OSError, json.JSONDecodeError):
+        pass
+    return None
+
+
+def _print_session_summary(session: Session) -> None:
+    """Print a summary of a session's content for context on resume."""
+    messages = session.messages
+    if not messages:
+        console.print("  [dim](empty session)[/dim]")
+        return
+
+    # Collect user messages as conversation summary
+    user_msgs = []
+    for msg in messages:
+        role = msg.get("role", "")
+        content = msg.get("content", "") or ""
+        if role == "user" and content.strip():
+            # Truncate long messages
+            preview = content.strip().replace("\n", " ")
+            if len(preview) > 80:
+                preview = preview[:77] + "..."
+            user_msgs.append(preview)
+
+    # Show first user message (topic) and last few messages (recent context)
+    if user_msgs:
+        console.print(f"  [dim]Topic: {user_msgs[0]}[/dim]")
+        if len(user_msgs) > 1:
+            recent = user_msgs[-3:] if len(user_msgs) > 3 else user_msgs[1:]
+            console.print("  [dim]Recent:[/dim]")
+            for msg in recent:
+                console.print(f"    [dim]→ {msg}[/dim]")
+
+    # Show compaction status
+    compaction_count = getattr(session, "_compaction_count", 0)
+    if compaction_count:
+        console.print(f"  [dim](compacted {compaction_count} time(s))[/dim]")
+
+    # Show token usage
+    usage = session.token_usage
+    if usage["total"] > 0:
+        console.print(f"  [dim]Tokens: {usage['total']:,} (prompt: {usage['prompt']:,}, completion: {usage['completion']:,})[/dim]")
 
 
 def _handle_model_command(agent: Agent, config: Config, user_input: str) -> None:
