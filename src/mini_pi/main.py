@@ -174,7 +174,7 @@ def _print_banner(config: Config) -> None:
         f"CWD: [dim]{config.cwd}[/dim]\n"
         f"Providers: [dim]{available_count} models available[/dim]\n"
         f"[dim]Streaming enabled ✨[/dim]\n"
-        f"Type [bold]exit[/bold] to quit, [bold]/model[/bold] to switch, [bold]status[/bold] for info",
+        f"Type [bold]exit[/bold] to quit, [bold]/model[/bold] to switch, [bold]/compact[/bold] to compress, [bold]status[/bold] for info",
         title="🤖 Mini Pi",
         border_style="cyan",
     ))
@@ -218,6 +218,11 @@ def _repl(agent: Agent, config: Config) -> None:
             _handle_models_list(config)
             continue
 
+        # Handle /compact command
+        if user_input.lower() == "/compact" or user_input.lower().startswith("/compact "):
+            _handle_compact(agent, user_input)
+            continue
+
         if user_input.lower() == "clear":
             agent.session.messages.clear()
             console.print("[dim]Session cleared.[/dim]")
@@ -241,6 +246,42 @@ def _repl(agent: Agent, config: Config) -> None:
             console.print("\n[yellow]Interrupted.[/yellow]")
         except Exception as e:
             console.print(f"[red]Error: {e}[/red]")
+
+
+def _handle_compact(agent: Agent, user_input: str) -> None:
+    """Handle /compact command — manually trigger context compaction."""
+    config = agent.config
+    if not config.compaction.enabled:
+        console.print("[yellow]Compaction is disabled.[/yellow]")
+        return
+
+    messages = agent.session.get_openai_messages()
+    if not messages:
+        console.print("[dim]No messages to compact.[/dim]")
+        return
+
+    # Parse optional custom instructions
+    parts = user_input.strip().split(maxsplit=1)
+    instructions = parts[1].strip() if len(parts) > 1 else ""
+
+    # Check token usage
+    ratio = agent.token_estimator.usage_ratio(messages)
+    count = len(messages)
+    console.print(f"[dim]Compacting {count} messages (context usage: {ratio:.0%})...[/dim]")
+
+    existing_summary = getattr(agent.session, "_last_compaction_summary", "")
+    result = agent.compactor.compact(
+        messages,
+        existing_summary=existing_summary,
+        instructions=instructions,
+    )
+    if result.success:
+        agent.session.record_compaction(result)
+        console.print(
+            f"[green]✅ Compacted {result.original_count} → {result.compacted_count} messages[/green]"
+        )
+    else:
+        console.print(f"[yellow]Compaction skipped: {result.error}[/yellow]")
 
 
 def _handle_model_command(agent: Agent, config: Config, user_input: str) -> None:
