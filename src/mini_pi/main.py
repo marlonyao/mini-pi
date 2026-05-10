@@ -22,7 +22,7 @@ from rich.panel import Panel
 from .agent import Agent
 from .config import Config
 from .llm import OpenAILLM
-from .session import Session, create_session, list_sessions
+from .session import Session, create_session, fork_session, list_sessions
 
 console = Console()
 
@@ -174,7 +174,7 @@ def _print_banner(config: Config) -> None:
         f"CWD: [dim]{config.cwd}[/dim]\n"
         f"Providers: [dim]{available_count} models available[/dim]\n"
         f"[dim]Streaming enabled ✨[/dim]\n"
-        f"Type [bold]exit[/bold] to quit, [bold]/model[/bold] to switch, [bold]/compact[/bold] to compress, [bold]status[/bold] for info",
+        f"Type [bold]exit[/bold] to quit, [bold]/model[/bold] to switch, [bold]/compact[/bold] to compress, [bold]/new[/bold]/[bold]/resume[/bold]/[bold]/fork[/bold] for sessions, [bold]status[/bold] for info",
         title="🤖 Mini Pi",
         border_style="cyan",
     ))
@@ -207,6 +207,26 @@ def _repl(agent: Agent, config: Config) -> None:
         if user_input.lower() == "exit":
             console.print("[dim]Bye! 👋[/dim]")
             break
+
+        # Handle /new command — start a new session
+        if user_input.lower() == "/new":
+            _handle_new_session(agent, config)
+            continue
+
+        # Handle /resume command — switch to a different session
+        if user_input.lower() == "/resume" or user_input.lower().startswith("/resume "):
+            _handle_resume(agent, config, user_input)
+            continue
+
+        # Handle /fork command — fork current session
+        if user_input.lower() == "/fork" or user_input.lower().startswith("/fork "):
+            _handle_fork(agent, config, user_input)
+            continue
+
+        # Handle /sessions command — list sessions
+        if user_input.lower() == "/sessions":
+            _handle_sessions(config)
+            continue
 
         # Handle /model command
         if user_input.lower() == "/model" or user_input.lower().startswith("/model "):
@@ -282,6 +302,99 @@ def _handle_compact(agent: Agent, user_input: str) -> None:
         )
     else:
         console.print(f"[yellow]Compaction skipped: {result.error}[/yellow]")
+
+
+def _handle_new_session(agent: Agent, config: Config) -> None:
+    """Handle /new command — start a fresh session."""
+    # Save current session first
+    agent.session.save()
+
+    # Create a new session
+    new_session = create_session(config.session_dir)
+    agent.session = new_session
+
+    console.print(f"[green]New session started: {new_session.path.stem}[/green]")
+    console.print("[dim]Previous session saved.[/dim]")
+
+
+def _handle_resume(agent: Agent, config: Config, user_input: str) -> None:
+    """Handle /resume command — switch to a different session."""
+    parts = user_input.strip().split(maxsplit=1)
+
+    if len(parts) == 1:
+        # No arg — show session list for selection
+        _handle_sessions(config)
+        console.print("[dim]Usage: /resume <name-or-number>[/dim]")
+        return
+
+    arg = parts[1].strip()
+    sessions = list_sessions(config.session_dir)
+    if not sessions:
+        console.print("[yellow]No sessions found.[/yellow]")
+        return
+
+    # Try to match by number (1-based index)
+    try:
+        idx = int(arg) - 1
+        if 0 <= idx < len(sessions):
+            target = sessions[idx]
+        else:
+            console.print(f"[red]Invalid session number: {arg}[/red]")
+            return
+    except ValueError:
+        # Match by name prefix
+        matches = [s for s in sessions if s["name"].startswith(arg)]
+        if len(matches) == 1:
+            target = matches[0]
+        elif len(matches) > 1:
+            console.print(f"[yellow]Ambiguous: {len(matches)} sessions match '{arg}'[/yellow]")
+            for m in matches[:5]:
+                console.print(f"  [dim]{m['name']}[/dim]")
+            return
+        else:
+            console.print(f"[red]Session not found: {arg}[/red]")
+            return
+
+    # Save current and switch
+    agent.session.save()
+    new_session = Session(Path(target["path"]))
+    agent.session = new_session
+
+    msg_count = len(new_session.messages)
+    console.print(f"[green]Resumed: {target['name']}[/green] [dim]({msg_count} messages)[/dim]")
+
+
+def _handle_fork(agent: Agent, config: Config, user_input: str) -> None:
+    """Handle /fork command — fork the current session."""
+    parts = user_input.strip().split(maxsplit=1)
+    name = parts[1].strip() if len(parts) > 1 else None
+
+    if not agent.session.messages:
+        console.print("[yellow]Nothing to fork — current session is empty.[/yellow]")
+        return
+
+    forked = fork_session(agent.session, config.session_dir, name)
+    agent.session = forked
+
+    console.print(f"[green]Forked session: {forked.path.stem}[/green]")
+    console.print(f"[dim]({len(forked.messages)} messages copied)[/dim]")
+
+
+def _handle_sessions(config: Config) -> None:
+    """Handle /sessions command — list all sessions."""
+    sessions = list_sessions(config.session_dir)
+    if not sessions:
+        console.print("[dim]No sessions found.[/dim]")
+        return
+
+    console.print("[bold cyan]Sessions:[/bold cyan]")
+    for i, s in enumerate(sessions[:20], 1):
+        size_kb = s["size"] / 1024
+        modified = s["modified"][:16]  # YYYY-MM-DDTHH:MM
+        console.print(f"  {i:>2}. [dim]{s['name']}[/dim]  [dim]({size_kb:.1f}KB, {modified})[/dim]")
+
+    if len(sessions) > 20:
+        console.print(f"  [dim]... and {len(sessions) - 20} more[/dim]")
 
 
 def _handle_model_command(agent: Agent, config: Config, user_input: str) -> None:

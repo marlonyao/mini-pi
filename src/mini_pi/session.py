@@ -174,3 +174,22 @@ def list_sessions(session_dir: str) -> list[dict]:
             "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
         })
     return sessions
+
+
+def fork_session(source: Session, session_dir: str, name: str | None = None) -> Session:
+    """
+    Create a fork of an existing session.
+
+    Copies all messages from source into a new session file.
+    The new session gets a new name and path.
+    """
+    new_session = create_session(session_dir, name)
+    new_session.messages = [msg.copy() for msg in source.messages]
+    new_session.token_usage = dict(source.token_usage)
+    # Preserve compaction state
+    if hasattr(source, "_compaction_count"):
+        new_session._compaction_count = source._compaction_count
+    if hasattr(source, "_last_compaction_summary"):
+        new_session._last_compaction_summary = source._last_compaction_summary
+    new_session.save()
+    return new_session
