@@ -426,33 +426,62 @@ def _get_session_topic(path: str, max_chars: int = 60) -> str | None:
     return None
 
 
+def _replay_history(messages: list[dict], max_messages: int = 10) -> None:
+    """
+    Replay recent conversation history in a compact format.
+
+    Shows the last `max_messages` messages with role labels and
+    truncated content, giving the user immediate context on resume.
+    """
+    # Show last N messages
+    start = max(0, len(messages) - max_messages)
+    recent = messages[start:]
+
+    if start > 0:
+        console.print(f"  [dim]... ({start} earlier messages skipped) ...[/dim]")
+
+    for msg in recent:
+        role = msg.get("role", "")
+        content = msg.get("content", "") or ""
+        tool_calls = msg.get("tool_calls")
+
+        if role == "system" and "[Compaction Summary]" in content:
+            # Show compaction summary
+            preview = content.replace("[Compaction Summary]", "").strip()
+            preview = preview.replace("\n", " ")[:100]
+            console.print(f"  [dim]📋 Summary: {preview}...[/dim]")
+            continue
+
+        if role == "user":
+            preview = content.strip().replace("\n", " ")
+            if len(preview) > 100:
+                preview = preview[:97] + "..."
+            console.print(f"  [cyan]You:[/cyan] {preview}")
+
+        elif role == "assistant":
+            if tool_calls:
+                # Summarize tool calls
+                tool_names = [tc.get("function", {}).get("name", "?") for tc in tool_calls]
+                console.print(f"  [dim]🤖 → {', '.join(tool_names)}[/dim]")
+            elif content.strip():
+                preview = content.strip().replace("\n", " ")
+                if len(preview) > 100:
+                    preview = preview[:97] + "..."
+                console.print(f"  [green]🤖:[/green] {preview}")
+
+        elif role == "tool":
+            preview = content.strip().replace("\n", " ")[:60]
+            console.print(f"  [dim]  → {preview}[/dim]")
+
+    console.print()
+
+
 def _print_session_summary(session: Session) -> None:
     """Print a summary of a session's content for context on resume."""
     messages = session.messages
     if not messages:
         console.print("  [dim](empty session)[/dim]")
         return
-
-    # Collect user messages as conversation summary
-    user_msgs = []
-    for msg in messages:
-        role = msg.get("role", "")
-        content = msg.get("content", "") or ""
-        if role == "user" and content.strip():
-            # Truncate long messages
-            preview = content.strip().replace("\n", " ")
-            if len(preview) > 80:
-                preview = preview[:77] + "..."
-            user_msgs.append(preview)
-
-    # Show first user message (topic) and last few messages (recent context)
-    if user_msgs:
-        console.print(f"  [dim]Topic: {user_msgs[0]}[/dim]")
-        if len(user_msgs) > 1:
-            recent = user_msgs[-3:] if len(user_msgs) > 3 else user_msgs[1:]
-            console.print("  [dim]Recent:[/dim]")
-            for msg in recent:
-                console.print(f"    [dim]→ {msg}[/dim]")
 
     # Show compaction status
     compaction_count = getattr(session, "_compaction_count", 0)
@@ -463,6 +492,10 @@ def _print_session_summary(session: Session) -> None:
     usage = session.token_usage
     if usage["total"] > 0:
         console.print(f"  [dim]Tokens: {usage['total']:,} (prompt: {usage['prompt']:,}, completion: {usage['completion']:,})[/dim]")
+
+    # Replay last N messages so user sees the conversation context
+    console.print()
+    _replay_history(messages, max_messages=10)
 
 
 def _handle_model_command(agent: Agent, config: Config, user_input: str) -> None:
