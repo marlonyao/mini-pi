@@ -142,11 +142,11 @@ class Session:
                 }
                 if hasattr(self, "_compaction_count") and self._compaction_count:
                     meta["compaction_count"] = self._compaction_count
-                f.write(json.dumps(meta) + "\n")
+                f.write(json.dumps(meta, ensure_ascii=False) + "\n")
 
             # Append only new messages (beyond _persisted_count)
             for msg in self.messages[self._persisted_count:]:
-                f.write(json.dumps({"type": "message", "data": msg}) + "\n")
+                f.write(json.dumps({"type": "message", "data": msg}, ensure_ascii=False) + "\n")
 
         self._persisted_count = len(self.messages)
 
@@ -181,8 +181,8 @@ class Session:
             snapshot["compaction_count"] = self._compaction_count
 
         with open(self.path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(meta_update) + "\n")
-            f.write(json.dumps(snapshot) + "\n")
+            f.write(json.dumps(meta_update, ensure_ascii=False) + "\n")
+            f.write(json.dumps(snapshot, ensure_ascii=False) + "\n")
 
         self._persisted_count = len(self.messages)
 
