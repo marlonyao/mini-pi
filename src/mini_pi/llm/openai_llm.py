@@ -25,8 +25,13 @@ class OpenAILLM(LLMBase):
         api_key: str,
         base_url: str = "https://api.openai.com/v1",
         model: str = "gpt-4o",
+        default_headers: dict[str, str] | None = None,
     ):
-        self.client = OpenAI(api_key=api_key, base_url=base_url)
+        self.client = OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            default_headers=default_headers,
+        )
         self.model = model
 
     def chat(

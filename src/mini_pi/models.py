@@ -121,6 +121,22 @@ BUILTIN_MODELS: dict[str, Any] = {
                 },
             },
         },
+        "kimi-coding": {
+            "api_key_env": "KIMI_API_KEY",
+            "base_url": "https://api.kimi.com/coding/v1",
+            "api_type": "anthropic",
+            "headers": {"User-Agent": "KimiCLI/1.5"},
+            "models": {
+                "kimi-for-coding": {
+                    "max_context_tokens": 262144,
+                    "thinking": True,
+                },
+                "kimi-k2-thinking": {
+                    "max_context_tokens": 262144,
+                    "thinking": True,
+                },
+            },
+        },
         "zhipu": {
             "api_key_env": "ZHIPU_API_KEY",
             "base_url": "https://open.bigmodel.cn/api/paas/v4/",
@@ -150,6 +166,35 @@ BUILTIN_MODELS: dict[str, Any] = {
                 },
                 "glm-4.7-flashx": {
                     "max_context_tokens": 200000,
+                },
+            },
+        },
+        "zai": {
+            "api_key_env": "ZAI_API_KEY",
+            "base_url": "https://api.z.ai/api/coding/paas/v4",
+            "models": {
+                "glm-5.1": {
+                    "max_context_tokens": 200000,
+                    "thinking": True,
+                    "thinking_type": "zai",
+                    "zai_tool_stream": True,
+                },
+                "glm-5-turbo": {
+                    "max_context_tokens": 200000,
+                    "thinking": True,
+                    "thinking_type": "zai",
+                    "zai_tool_stream": True,
+                },
+                "glm-4.7": {
+                    "max_context_tokens": 204800,
+                    "thinking": True,
+                    "thinking_type": "zai",
+                    "zai_tool_stream": True,
+                },
+                "glm-4.5-air": {
+                    "max_context_tokens": 131072,
+                    "thinking": True,
+                    "thinking_type": "zai",
                 },
             },
         },
@@ -190,14 +235,17 @@ BUILTIN_MODELS: dict[str, Any] = {
 class ModelInfo:
     """Resolved info for a specific model."""
 
-    provider: str  # e.g. "zhipu", "kimi"
+    provider: str  # e.g. "zhipu", "kimi", "zai", "kimi-coding"
     model: str  # e.g. "glm-5.1", "kimi-k2.6"
     api_key: str
     base_url: str
+    api_type: str = "openai"  # "openai" or "anthropic"
     max_context_tokens: int = 128000
     thinking: bool = False
-    thinking_type: str | None = None  # "enabled" for zhipu/kimi
-    temperature: float | None = None  # Some models require specific temperature
+    thinking_type: str | None = None  # "enabled" for zhipu, "zai" for z.ai
+    temperature: float | None = None
+    zai_tool_stream: bool = False  # z.ai specific: tool_stream=true
+    headers: dict[str, str] | None = None  # Custom headers (e.g. User-Agent for kimi-coding)  # Some models require specific temperature
 
 
 @dataclass
@@ -319,10 +367,13 @@ class ModelRegistry:
             model=model,
             api_key=api_key,
             base_url=base_url,
+            api_type=prov_data.get("api_type", "openai"),
             max_context_tokens=model_data.get("max_context_tokens", 128000),
             thinking=model_data.get("thinking", False),
             thinking_type=model_data.get("thinking_type"),
             temperature=model_data.get("temperature"),
+            zai_tool_stream=model_data.get("zai_tool_stream", False),
+            headers=prov_data.get("headers"),
         )
 
     def list_models(self) -> list[dict[str, Any]]:
@@ -378,17 +429,21 @@ def create_llm(model_info: ModelInfo) -> LLMBase:
         api_key=model_info.api_key,
         base_url=model_info.base_url,
         model=model_info.model,
+        default_headers=model_info.headers,
     )
+
 
 
 def get_model_extra_kwargs(model_info: ModelInfo) -> dict[str, Any]:
     """
     Get extra kwargs to pass to the LLM call for provider-specific features.
 
-    Examples:
-    - Zhipu GLM-5.1: extra_body={"thinking": {"type": "enabled"}}
-    - Kimi K2.6: thinking={"type": "enabled"} (top-level)
-    - DeepSeek reasoner: (handled via reasoning_content in streaming)
+    Provider-specific handling:
+    - zhipu: extra_body={"thinking": {"type": "enabled"}}, temperature=1.0
+    - zai: extra_body={"enable_thinking": True}, tool_stream=True
+    - kimi: extra_body={"thinking": {"type": "enabled"}}
+    - kimi-coding: (anthropic format, handled separately)
+    - deepseek: reasoning_content in streaming (auto-detected)
     """
     kwargs: dict[str, Any] = {}
 
@@ -400,14 +455,19 @@ def get_model_extra_kwargs(model_info: ModelInfo) -> dict[str, Any]:
 
     # Thinking mode
     if model_info.thinking:
-        thinking_type = model_info.thinking_type or "enabled"
-
-        if model_info.provider == "zhipu":
-            # 智谱: thinking as extra_body parameter
-            kwargs.setdefault("extra_body", {})["thinking"] = {"type": thinking_type}
+        if model_info.provider == "zai":
+            # 智谱 Coding Plan (z.ai): enable_thinking + tool_stream
+            kwargs.setdefault("extra_body", {})["enable_thinking"] = True
+            if model_info.zai_tool_stream:
+                kwargs.setdefault("extra_body", {})["tool_stream"] = True
+        elif model_info.provider == "zhipu":
+            # 智谱开放平台: thinking as extra_body
+            kwargs.setdefault("extra_body", {})["thinking"] = {
+                "type": model_info.thinking_type or "enabled"
+            }
         elif model_info.provider == "kimi":
-            # Kimi: thinking as top-level parameter (K2.5+)
-            kwargs["extra_body"] = {"thinking": {"type": thinking_type}}
-        # DeepSeek reasoning is auto-detected via reasoning_content in streaming
+            # Kimi 开放平台: thinking as extra_body
+            kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
+        # kimi-coding uses Anthropic format, handled by AnthropicLLM
 
     return kwargs
