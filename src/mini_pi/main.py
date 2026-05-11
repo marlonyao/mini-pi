@@ -253,6 +253,10 @@ def _repl(agent: Agent, config: Config) -> None:
             _handle_extensions_list(agent)
             continue
 
+        if user_input.lower().startswith("/steer "):
+            _handle_steer_command(agent, user_input)
+            continue
+
         if user_input.lower() == "clear":
             agent.session.messages.clear()
             console.print("[dim]Session cleared.[/dim]")
@@ -273,7 +277,8 @@ def _repl(agent: Agent, config: Config) -> None:
         try:
             _run_streaming(agent, user_input)
         except KeyboardInterrupt:
-            console.print("\n[yellow]Interrupted.[/yellow]")
+            # Instead of just interrupting, offer steering
+            _handle_interrupt_with_steering(agent)
         except Exception as e:
             console.print(f"[red]Error: {e}[/red]")
 
@@ -679,9 +684,44 @@ def _handle_extensions_list(agent: Agent) -> None:
             tool_names = ", ".join(t["function"]["name"] for t in ext.tools)
             parts.append(f"[dim]tools: {tool_names}[/dim]")
         if ext.commands:
-            cmd_names = ", ".join(f"/ext:{n}" for n in sorted(ext.commands.keys()))
+            cmd_names = ", ",join(f"/ext:{n}" for n in sorted(ext.commands.keys()))
             parts.append(f"[dim]cmds: {cmd_names}[/dim]")
         console.print("  • " + " | ".join(parts))
+
+
+def _handle_steer_command(agent: Agent, user_input: str) -> None:
+    """Queue a steering message for the running agent loop."""
+    msg = user_input[7:].strip()  # strip "/steer "
+    if not msg:
+        console.print("[dim]Usage: /steer <message> — inject guidance into the running agent[/dim]")
+        return
+    agent.steer(msg)
+    console.print(f"[green]✓ Steering message queued: {msg[:60]}{'...' if len(msg) > 60 else ''}[/green]")
+
+
+def _handle_interrupt_with_steering(agent: Agent) -> None:
+    """Handle Ctrl+C during agent execution with steering option."""
+    console.print("\n[yellow]Agent interrupted.[/yellow]")
+    console.print("[dim]Options:[/dim]")
+    console.print("[dim]  /steer <msg> — inject guidance and continue[/dim]")
+    console.print("[dim]  (blank line) — continue without steering[/dim]")
+    console.print("[dim]  q — stop the agent[/dim]")
+
+    try:
+        response = console.input("[bold]> [/bold]").strip()
+        if response.lower() == "q":
+            console.print("[yellow]Agent stopped.[/yellow]")
+            return
+        elif response:
+            agent.steer(response)
+            console.print(f"[green]✓ Steering: {response[:60]}[/green]")
+            # Continue the agent loop
+            try:
+                _run_streaming(agent, "")  # Empty message triggers loop continuation
+            except KeyboardInterrupt:
+                console.print("\n[yellow]Stopped.[/yellow]")
+    except (EOFError, KeyboardInterrupt):
+        console.print("\n[yellow]Agent stopped.[/yellow]")
 
 
 if __name__ == "__main__":

@@ -72,6 +72,9 @@ class Agent:
         if skill_tools:
             self.tools.extend(skill_tools)
 
+        # Steering: mid-execution user interventions
+        self._steering_messages: list[str] = []
+
         # Extension system — hooks, custom tools, commands
         self.extension_manager = ExtensionManager()
         self.extension_manager.discover()
@@ -104,9 +107,23 @@ class Agent:
         self.session.add_user(user_message)
         return self._agent_loop()
 
+    def steer(self, message: str) -> None:
+        """
+        Inject a steering message into the running agent loop.
+
+        The message is queued and consumed at the next loop iteration,
+        appearing as a user message that guides the agent's behavior.
+        """
+        self._steering_messages.append(message)
+
     def _agent_loop(self) -> str:
         """Run the agent loop until a final text response is produced."""
         for step in range(self.config.max_steps):
+            # Consume any steering messages injected mid-execution
+            while self._steering_messages:
+                msg = self._steering_messages.pop(0)
+                self.session.add_user(msg)
+                print(f"\n  📣 Steering: {msg[:80]}{'...' if len(msg) > 80 else ''}")
             # Auto-compaction: check if context is approaching limit
             self._maybe_compact()
 
