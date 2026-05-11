@@ -19,6 +19,7 @@ from typing import Any
 from .compactor import Compactor, CompactionConfig
 from .config import Config
 from .context import prune_messages, PruningConfig
+from .extensions import ExtensionManager, EventContext
 from .llm import LLMBase, OpenAILLM
 from .models import create_llm
 from .session import Session
@@ -66,6 +67,15 @@ class Agent:
         if skill_catalog:
             self.system_prompt += skill_catalog
 
+        # Extension system — hooks, custom tools, commands
+        self.extension_manager = ExtensionManager()
+        self.extension_manager.discover()
+
+        # Register extension tools alongside core tools
+        ext_tools = self.extension_manager.get_all_tools()
+        if ext_tools:
+            self.tools.extend(ext_tools)
+
         # Compaction support — reuse the LLM's OpenAI client for summarization
         # (compactor still uses raw OpenAI client for simplicity)
         self.compactor = Compactor(config.compaction)
@@ -75,6 +85,11 @@ class Agent:
         self.token_estimator = TokenEstimator(
             max_context_tokens=config.compaction.max_context_tokens,
         )
+
+        # Emit startup event
+        self.extension_manager.emit("on_start", EventContext(
+            event="on_start", agent=self,
+        ))
 
     def chat(self, user_message: str) -> str:
         """
@@ -98,14 +113,29 @@ class Agent:
                 *pruned,
             ]
 
+            # Extension hook: on_before_llm_call (can mutate messages/kwargs)
+            ctx = self.extension_manager.emit("on_before_llm_call", EventContext(
+                event="on_before_llm_call", agent=self,
+                messages=messages, extra_kwargs=self._extra_kwargs,
+            ))
+            # Use possibly-mutated messages and kwargs
+            messages = ctx.messages or messages
+            call_kwargs = ctx.extra_kwargs if ctx.extra_kwargs else self._extra_kwargs
+
             # Call LLM via abstraction (with provider-specific kwargs)
             response = self.llm.chat(
                 messages=messages,
                 tools=self.tools,
                 on_text=self._on_text,
                 on_reasoning=self._on_reasoning,
-                **self._extra_kwargs,
+                **call_kwargs,
             )
+
+            # Extension hook: on_after_llm_call
+            self.extension_manager.emit("on_after_llm_call", EventContext(
+                event="on_after_llm_call", agent=self,
+                response=response, messages=messages,
+            ))
 
             # Track token usage
             if response.usage:
@@ -126,12 +156,33 @@ class Agent:
                     args = json.loads(tc.arguments)
                     print(f"\n  🔧 {tc.name}({self._format_args(args)})")
 
-                    result = execute_tool(
-                        tc.name,
-                        args,
-                        timeout=self.config.timeout,
-                        cwd=self.config.cwd,
-                    )
+                    # Extension hook: on_before_tool_call
+                    self.extension_manager.emit("on_before_tool_call", EventContext(
+                        event="on_before_tool_call", agent=self,
+                        tool_name=tc.name, tool_args=args,
+                    ))
+
+                    # Try extension tool first, then core tools
+                    ext_executor = self.extension_manager.get_tool_executor(tc.name)
+                    if ext_executor:
+                        try:
+                            result = ext_executor(args, cwd=self.config.cwd)
+                        except Exception as e:
+                            result = f"Error: {e}"
+                    else:
+                        result = execute_tool(
+                            tc.name,
+                            args,
+                            timeout=self.config.timeout,
+                            cwd=self.config.cwd,
+                        )
+
+                    # Extension hook: on_after_tool_call
+                    self.extension_manager.emit("on_after_tool_call", EventContext(
+                        event="on_after_tool_call", agent=self,
+                        tool_name=tc.name, tool_args=args,
+                        tool_result=result,
+                    ))
 
                     # Show brief result
                     preview = result[:200].replace("\n", " ")
@@ -148,6 +199,13 @@ class Agent:
                 if response.reasoning_content:
                     assistant_kwargs["reasoning_content"] = response.reasoning_content
                 self.session.add_assistant(**assistant_kwargs)
+
+                # Extension hook: on_final_response
+                self.extension_manager.emit("on_final_response", EventContext(
+                    event="on_final_response", agent=self,
+                    response=response,
+                ))
+
                 self.session.save()
                 return response.content
 
@@ -183,6 +241,12 @@ class Agent:
 
         messages = self.session.get_openai_messages()
         if self.token_estimator.should_compact(messages, threshold=config.threshold):
+            # Extension hook: on_before_compact
+            self.extension_manager.emit("on_before_compact", EventContext(
+                event="on_before_compact", agent=self,
+                messages=messages,
+            ))
+
             print("\n  🧹 Auto-compacting conversation...")
 
             # Support incremental update if we have a previous summary
@@ -197,3 +261,9 @@ class Agent:
                 print(f"     Compacted {result.original_count} → {result.compacted_count} messages")
             else:
                 print(f"     Compaction skipped: {result.error}")
+
+            # Extension hook: on_after_compact
+            self.extension_manager.emit("on_after_compact", EventContext(
+                event="on_after_compact", agent=self,
+                compaction_result=result,
+            ))

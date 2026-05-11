@@ -244,6 +244,15 @@ def _repl(agent: Agent, config: Config) -> None:
             _handle_compact(agent, user_input)
             continue
 
+        # Handle extension commands: /ext:<name> [args]
+        if user_input.lower().startswith("/ext:"):
+            _handle_extension_command(agent, user_input)
+            continue
+
+        if user_input.lower() == "/extensions":
+            _handle_extensions_list(agent)
+            continue
+
         if user_input.lower() == "clear":
             agent.session.messages.clear()
             console.print("[dim]Session cleared.[/dim]")
@@ -625,6 +634,54 @@ def _run_streaming(agent: Agent, user_message: str) -> None:
         sys.stdout = old_stdout
         display.stop()
         console.print()
+
+
+def _handle_extension_command(agent: Agent, user_input: str) -> None:
+    """Handle /ext:<name> commands registered by extensions."""
+    parts = user_input[5:].strip().split(maxsplit=1)  # strip "/ext:"
+    cmd_name = parts[0] if parts else ""
+    cmd_args = parts[1] if len(parts) > 1 else ""
+
+    if not cmd_name:
+        _handle_extensions_list(agent)
+        return
+
+    ext_commands = agent.extension_manager.get_all_commands()
+    if cmd_name in ext_commands:
+        ext, handler = ext_commands[cmd_name]
+        try:
+            result = handler(cmd_args, agent=agent)
+            if result:
+                console.print(str(result))
+        except Exception as e:
+            console.print(f"[red]Extension command error ({ext.name}): {e}[/red]")
+    else:
+        console.print(f"[yellow]Unknown extension command: {cmd_name}[/yellow]")
+        console.print("[dim]Use /extensions to list available commands[/dim]")
+
+
+def _handle_extensions_list(agent: Agent) -> None:
+    """List loaded extensions and their capabilities."""
+    exts = agent.extension_manager.extensions
+
+    if not exts:
+        console.print("[dim]No extensions loaded.[/dim]")
+        console.print("[dim]Place .py files in ~/.mini-pi/extensions/ to add extensions[/dim]")
+        return
+
+    console.print("[bold cyan]Extensions:[/bold cyan]")
+    for ext in exts:
+        parts = [f"[green]{ext.name}[/green]"]
+        if ext.handlers:
+            events = ", ".join(sorted(ext.handlers.keys()))
+            parts.append(f"[dim]events: {events}[/dim]")
+        if ext.tools:
+            tool_names = ", ".join(t["function"]["name"] for t in ext.tools)
+            parts.append(f"[dim]tools: {tool_names}[/dim]")
+        if ext.commands:
+            cmd_names = ", ".join(f"/ext:{n}" for n in sorted(ext.commands.keys()))
+            parts.append(f"[dim]cmds: {cmd_names}[/dim]")
+        console.print("  • " + " | ".join(parts))
 
 
 if __name__ == "__main__":
