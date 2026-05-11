@@ -32,6 +32,11 @@ class Config:
         os.path.expanduser("~/.mini-pi/skills"),
     ])
 
+    # Templates
+    template_dirs: list[str] = field(default_factory=lambda: [
+        os.path.expanduser("~/.mini-pi/templates"),
+    ])
+
     # Context management
     pruning: PruningConfig = field(default_factory=PruningConfig)
     compaction: CompactionConfig = field(default_factory=CompactionConfig)

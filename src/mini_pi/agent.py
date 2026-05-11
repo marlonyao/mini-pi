@@ -25,6 +25,7 @@ from .models import create_llm
 from .session import Session
 from .skills import SkillManager
 from .system_prompt import build_system_prompt
+from .templates import TemplateManager
 from .tools import execute_tool, get_openai_tools
 from .token_estimator import TokenEstimator
 
@@ -75,6 +76,12 @@ class Agent:
         # Steering: mid-execution user interventions
         self._steering_messages: list[str] = []
 
+        # Prompt templates
+        self.template_manager = TemplateManager(
+            template_dirs=config.template_dirs,
+        )
+        self.template_manager.discover()
+
         # Extension system — hooks, custom tools, commands
         self.extension_manager = ExtensionManager()
         self.extension_manager.discover()
@@ -115,6 +122,34 @@ class Agent:
         appearing as a user message that guides the agent's behavior.
         """
         self._steering_messages.append(message)
+
+    def apply_template(self, template_name: str) -> str | None:
+        """
+        Apply a prompt template to the current session.
+
+        - Appends to the system prompt
+        - Optionally switches model
+        - Optionally injects starter messages
+
+        Returns the template description, or None if not found.
+        """
+        template = self.template_manager.get(template_name)
+        if template is None:
+            return None
+
+        if template.system_append:
+            self.system_prompt += f"\n\n{template.system_append}"
+
+        if template.messages:
+            for msg in template.messages:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                if role == "user":
+                    self.session.add_user(content)
+                elif role == "assistant":
+                    self.session.add_assistant(content)
+
+        return template.description or template.name
 
     def _agent_loop(self) -> str:
         """Run the agent loop until a final text response is produced."""

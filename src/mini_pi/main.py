@@ -257,6 +257,14 @@ def _repl(agent: Agent, config: Config) -> None:
             _handle_steer_command(agent, user_input)
             continue
 
+        if user_input.lower() == "/templates":
+            _handle_templates_list(agent)
+            continue
+
+        if user_input.lower().startswith("/template "):
+            _handle_template_apply(agent, user_input)
+            continue
+
         if user_input.lower() == "clear":
             agent.session.messages.clear()
             console.print("[dim]Session cleared.[/dim]")
@@ -684,7 +692,7 @@ def _handle_extensions_list(agent: Agent) -> None:
             tool_names = ", ".join(t["function"]["name"] for t in ext.tools)
             parts.append(f"[dim]tools: {tool_names}[/dim]")
         if ext.commands:
-            cmd_names = ", ",join(f"/ext:{n}" for n in sorted(ext.commands.keys()))
+            cmd_names = ", ".join(f"/ext:{n}" for n in sorted(ext.commands.keys()))
             parts.append(f"[dim]cmds: {cmd_names}[/dim]")
         console.print("  • " + " | ".join(parts))
 
@@ -722,6 +730,40 @@ def _handle_interrupt_with_steering(agent: Agent) -> None:
                 console.print("\n[yellow]Stopped.[/yellow]")
     except (EOFError, KeyboardInterrupt):
         console.print("\n[yellow]Agent stopped.[/yellow]")
+
+
+def _handle_templates_list(agent: Agent) -> None:
+    """List available prompt templates."""
+    templates = agent.template_manager.templates
+    if not templates:
+        console.print("[dim]No templates found.[/dim]")
+        console.print("[dim]Place .yaml files in ~/.mini-pi/templates/ to add templates[/dim]")
+        return
+
+    console.print("[bold cyan]Templates:[/bold cyan]")
+    for t in templates:
+        parts = [f"[green]{t.name}[/green]"]
+        if t.description:
+            parts.append(f"[dim]{t.description}[/dim]")
+        if t.model:
+            parts.append(f"[dim]model: {t.model}[/dim]")
+        console.print("  • " + " | ".join(parts))
+    console.print("\n[dim]Use /template <name> to apply a template[/dim]")
+
+
+def _handle_template_apply(agent: Agent, user_input: str) -> None:
+    """Apply a prompt template to the current session."""
+    name = user_input[10:].strip()  # strip "/template "
+    if not name:
+        _handle_templates_list(agent)
+        return
+
+    result = agent.apply_template(name)
+    if result is None:
+        console.print(f"[yellow]Template not found: {name}[/yellow]")
+        _handle_templates_list(agent)
+    else:
+        console.print(f"[green]✓ Template '{name}' applied: {result}[/green]")
 
 
 if __name__ == "__main__":
