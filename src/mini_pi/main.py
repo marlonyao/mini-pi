@@ -606,12 +606,13 @@ def _handle_models_list(config: Config) -> None:
 
 
 def _run_streaming(agent: Agent, user_message: str) -> None:
-    """Run agent with a streaming display.
+    """Run agent with a streaming display + background steering thread.
 
-    We monkey-patch sys.stdout to capture streamed text chunks
-    from the agent, and write them to the original stdout immediately.
+    A background thread reads stdin during agent execution.
+    Type `/steer <msg>` at any time to inject guidance mid-execution.
     """
     import io
+    import threading
 
     old_stdout = sys.stdout
     display = StreamingDisplay(old_stdout)
@@ -640,10 +641,40 @@ def _run_streaming(agent: Agent, user_message: str) -> None:
         def isatty(self) -> bool:
             return False
 
+    # Background thread: read stdin for steering commands during execution
+    stop_event = threading.Event()
+
+    def _stdin_reader():
+        """Background thread that reads /steer commands from stdin."""
+        while not stop_event.is_set():
+            try:
+                line = sys.stdin.readline()
+                if not line:
+                    break
+                line = line.strip()
+                if line.lower().startswith("/steer "):
+                    msg = line[7:].strip()
+                    if msg:
+                        agent.steer(msg)
+                        old_stdout.write(
+                            f"\n  📣 Steering queued: {msg[:60]}"
+                            f"{'...' if len(msg) > 60 else ''}\n"
+                        )
+                        old_stdout.flush()
+                    else:
+                        old_stdout.write("  [dim]Usage: /steer <message>[/dim]\n")
+                        old_stdout.flush()
+            except Exception:
+                break
+
+    reader_thread = threading.Thread(target=_stdin_reader, daemon=True)
+    reader_thread.start()
+
     try:
         sys.stdout = StreamCapture(old_stdout, display)  # type: ignore
         agent.chat(user_message)
     finally:
+        stop_event.set()
         sys.stdout = old_stdout
         display.stop()
         console.print()
@@ -708,28 +739,9 @@ def _handle_steer_command(agent: Agent, user_input: str) -> None:
 
 
 def _handle_interrupt_with_steering(agent: Agent) -> None:
-    """Handle Ctrl+C during agent execution with steering option."""
+    """Handle Ctrl+C during agent execution."""
     console.print("\n[yellow]Agent interrupted.[/yellow]")
-    console.print("[dim]Options:[/dim]")
-    console.print("[dim]  /steer <msg> — inject guidance and continue[/dim]")
-    console.print("[dim]  (blank line) — continue without steering[/dim]")
-    console.print("[dim]  q — stop the agent[/dim]")
-
-    try:
-        response = console.input("[bold]> [/bold]").strip()
-        if response.lower() == "q":
-            console.print("[yellow]Agent stopped.[/yellow]")
-            return
-        elif response:
-            agent.steer(response)
-            console.print(f"[green]✓ Steering: {response[:60]}[/green]")
-            # Continue the agent loop
-            try:
-                _run_streaming(agent, "")  # Empty message triggers loop continuation
-            except KeyboardInterrupt:
-                console.print("\n[yellow]Stopped.[/yellow]")
-    except (EOFError, KeyboardInterrupt):
-        console.print("\n[yellow]Agent stopped.[/yellow]")
+    console.print("[dim]Type /steer <msg> to inject guidance and continue[/dim]")
 
 
 def _handle_templates_list(agent: Agent) -> None:

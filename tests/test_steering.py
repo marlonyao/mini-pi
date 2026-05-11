@@ -92,3 +92,27 @@ class TestSteeringInAgentLoop:
         assert user_msgs[0] == "go"
         assert user_msgs[1] == "first steer"
         assert user_msgs[2] == "second steer"
+
+    def test_steer_from_thread_is_thread_safe(self, tmp_path):
+        """Steering from a background thread is safe."""
+        import threading
+
+        config = Config(api_key="test-key")
+        session = Session(tmp_path / "test.jsonl")
+
+        llm = FakeLLM(responses=[ChatResponse(content="Done.")])
+        agent = Agent(config, session, llm=llm)
+
+        # Simulate background thread calling steer
+        results = []
+
+        def bg_steer():
+            agent.steer("from background")
+            results.append(True)
+
+        t = threading.Thread(target=bg_steer)
+        t.start()
+        t.join()
+
+        assert len(agent._steering_messages) == 1
+        assert agent._steering_messages[0] == "from background"
