@@ -142,10 +142,11 @@ class TestAgentSkillIntegration:
         agent = Agent(config, session, llm=fake_llm)
 
         tool_names = {t["function"]["name"] for t in agent.tools}
-        assert tool_names == {"bash", "read", "write", "edit", "grep", "find", "ls"}
+        # Core tools must be present
+        assert {"bash", "read", "write", "edit", "grep", "find", "ls"}.issubset(tool_names)
 
-    def test_no_skill_tools_pre_registered(self, tmp_path):
-        """Skill tools should NOT be pre-registered at startup."""
+    def test_skill_tools_auto_registered(self, tmp_path):
+        """Skill tools should be auto-registered at startup."""
         # Create a skill with tools.py
         skill_dir = tmp_path / "tool-skill"
         skill_dir.mkdir()
@@ -158,7 +159,7 @@ class TestAgentSkillIntegration:
             "    '''Count things.'''\n"
             "    what: str = Field(description='What to count')\n\n"
             "def tool_count(params, **kwargs):\n"
-            "    return f'Counting {params.what}'\n\n"
+            "    return f'Counting {params[\"what\"]}'\n\n"
             "TOOL_DEFINITIONS = {\n"
             "    'count': (CountParams, tool_count),\n"
             "}\n"
@@ -173,9 +174,16 @@ class TestAgentSkillIntegration:
         agent = Agent(config, session, llm=fake_llm)
 
         tool_names = {t["function"]["name"] for t in agent.tools}
-        # Only core tools, NOT skill tools
-        assert "count" not in tool_names
-        assert tool_names == {"bash", "read", "write", "edit", "grep", "find", "ls"}
+        # Core tools + skill tool
+        assert "count" in tool_names
+        assert "bash" in tool_names
+
+        # Executor should be available
+        assert "count" in agent._skill_executors
+        skill, handler = agent._skill_executors["count"]
+        assert skill.name == "tool-skill"
+        result = handler({"what": "lines"})
+        assert "Counting lines" in result
 
 
 # ── StreamingDisplay test (unchanged) ──────────────────────────────

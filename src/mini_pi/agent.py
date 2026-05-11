@@ -67,6 +67,11 @@ class Agent:
         if skill_catalog:
             self.system_prompt += skill_catalog
 
+        # Register skill tools (from skills that define tools.py)
+        skill_tools, self._skill_executors = self.skill_manager.get_all_skill_tools()
+        if skill_tools:
+            self.tools.extend(skill_tools)
+
         # Extension system — hooks, custom tools, commands
         self.extension_manager = ExtensionManager()
         self.extension_manager.discover()
@@ -162,11 +167,17 @@ class Agent:
                         tool_name=tc.name, tool_args=args,
                     ))
 
-                    # Try extension tool first, then core tools
+                    # Try extension tool → skill tool → core tools
                     ext_executor = self.extension_manager.get_tool_executor(tc.name)
                     if ext_executor:
                         try:
                             result = ext_executor(args, cwd=self.config.cwd)
+                        except Exception as e:
+                            result = f"Error: {e}"
+                    elif tc.name in self._skill_executors:
+                        _skill, handler = self._skill_executors[tc.name]
+                        try:
+                            result = handler(args, cwd=self.config.cwd)
                         except Exception as e:
                             result = f"Error: {e}"
                     else:

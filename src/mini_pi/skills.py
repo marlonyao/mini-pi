@@ -221,6 +221,41 @@ class SkillManager:
                 return skill
         return None
 
+    def get_all_skill_tools(self) -> tuple[list[dict], dict[str, tuple[Skill, Any]]]:
+        """
+        Load tools from all skills that define tools.py.
+
+        Returns (tool_definitions, tool_executors) where:
+        - tool_definitions: list of OpenAI-compatible tool dicts to register with LLM
+        - tool_executors: dict mapping tool_name → (skill, handler) for execution
+        """
+        all_tools = []
+        executors = {}
+
+        for skill in self.skills:
+            try:
+                tools = skill.load_tools()
+                if tools:
+                    # Also load tool executors from the module
+                    tools_py = skill.skill_dir / "tools.py"
+                    if tools_py.exists():
+                        import importlib.util as iu
+                        spec = iu.spec_from_file_location(
+                            f"skill_{skill.name}_tools",
+                            tools_py,
+                        )
+                        if spec and spec.loader:
+                            mod = iu.module_from_spec(spec)
+                            spec.loader.exec_module(mod)
+                            if hasattr(mod, "TOOL_DEFINITIONS"):
+                                for tool_name, (_, handler) in mod.TOOL_DEFINITIONS.items():
+                                    executors[tool_name] = (skill, handler)
+                    all_tools.extend(tools)
+            except Exception:
+                pass
+
+        return all_tools, executors
+
     @property
     def skills(self) -> list[Skill]:
         """All discovered skills."""
