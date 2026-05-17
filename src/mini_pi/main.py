@@ -215,7 +215,7 @@ def _repl(agent: Agent, config: Config) -> None:
             if buf.document.current_line.rstrip().endswith("\\"):
                 buf.insert_text("\n")
             else:
-                buf.validate_and_handle_enter()
+                buf.validate_and_handle()
 
         @kb.add("escape", "enter")
         def _alt_enter(event: object) -> None:  # type: ignore[misc]
