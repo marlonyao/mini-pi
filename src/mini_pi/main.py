@@ -181,18 +181,58 @@ def _print_banner(config: Config) -> None:
     ))
 
 
+def _multiline_input(prompt: str = "You > ") -> str:
+    """Fallback multi-line input when prompt_toolkit is not available.
+
+    Supports `\\` + Enter for line continuation.
+    """
+    lines: list[str] = [input(prompt)]
+    while lines[-1].rstrip().endswith("\\"):
+        lines[-1] = lines[-1].rstrip()[:-1]  # strip trailing backslash
+        lines.append(input(".. > "))
+    return "\n".join(lines)
+
+
 def _repl(agent: Agent, config: Config) -> None:
     """Interactive read-eval-print loop with streaming display."""
     try:
         from prompt_toolkit import PromptSession
         from prompt_toolkit.history import FileHistory
+        from prompt_toolkit.key_binding import KeyBindings
 
         history_file = Path(config.session_dir) / ".repl_history"
         history_file.parent.mkdir(parents=True, exist_ok=True)
-        prompt_session = PromptSession(history=FileHistory(str(history_file)))
+
+        # Key bindings: Option+Enter / Alt+Enter inserts a newline.
+        kb = KeyBindings()
+
+        @kb.add("escape", "enter")
+        def _option_enter(event: object) -> None:  # type: ignore[misc]
+            """Option+Enter (macOS) or Alt+Enter inserts a newline."""
+            event.current_buffer.insert_text("\n")  # type: ignore[attr-defined]
+
+        def _is_complete(buffer: object) -> bool:  # type: ignore[type-arg]
+            """Enter submits unless the current line ends with a backslash.
+
+            - `\\` + Enter → insert newline (continuation)
+            - Otherwise     → submit
+            """
+            text = buffer.text  # type: ignore[attr-defined]
+            if not text:
+                return True
+            stripped = text.rstrip()
+            return not stripped.endswith("\\")
+
+        prompt_session = PromptSession(
+            history=FileHistory(str(history_file)),
+            multiline=True,
+            is_complete=_is_complete,
+            key_bindings=kb,
+            prompt_continuation=".. > ",
+        )
         prompt_func = lambda: prompt_session.prompt("You > ")
     except ImportError:
-        prompt_func = lambda: input("You > ")
+        prompt_func = lambda: _multiline_input("You > ")
 
     while True:
         try:
