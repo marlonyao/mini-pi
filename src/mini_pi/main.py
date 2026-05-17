@@ -203,12 +203,12 @@ def _repl(agent: Agent, config: Config) -> None:
         history_file = Path(config.session_dir) / ".repl_history"
         history_file.parent.mkdir(parents=True, exist_ok=True)
 
-        # Key bindings: Option+Enter / Alt+Enter inserts a newline.
+        # Key bindings: Shift+Enter inserts a newline.
         kb = KeyBindings()
 
-        @kb.add("escape", "enter")
-        def _option_enter(event: object) -> None:  # type: ignore[misc]
-            """Option+Enter (macOS) or Alt+Enter inserts a newline."""
+        @kb.add("s-enter")
+        def _shift_enter(event: object) -> None:  # type: ignore[misc]
+            """Shift+Enter inserts a newline."""
             event.current_buffer.insert_text("\n")  # type: ignore[attr-defined]
 
         def _is_complete(buffer: object) -> bool:  # type: ignore[type-arg]
