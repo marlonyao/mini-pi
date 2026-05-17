@@ -77,6 +77,7 @@ class Config:
         info = self.model_registry.resolve(spec)
         if info and info.api_key:
             self._current_model_info = info
+            self.compaction.max_context_tokens = info.max_context_tokens
             return info
 
         # Also try the default from registry
@@ -86,6 +87,7 @@ class Config:
                 info = self.model_registry.resolve(default)
                 if info and info.api_key:
                     self._current_model_info = info
+                    self.compaction.max_context_tokens = info.max_context_tokens
                     return info
 
         # Fallback: legacy env-based config

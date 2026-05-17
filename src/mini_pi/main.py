@@ -606,7 +606,8 @@ def _switch_model(agent: Agent, config: Config, model_spec: str) -> None:
     if isinstance(agent.llm, OpenAILLM):
         agent.compactor.client = agent.llm.client
 
-    # Update token estimator
+    # Sync CompactionConfig and token estimator
+    config.compaction.max_context_tokens = model_info.max_context_tokens
     agent.token_estimator.max_context_tokens = model_info.max_context_tokens
 
     thinking_str = " [dim](thinking on)[/dim]" if model_info.thinking else ""
