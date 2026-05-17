@@ -203,12 +203,14 @@ def _repl(agent: Agent, config: Config) -> None:
         history_file = Path(config.session_dir) / ".repl_history"
         history_file.parent.mkdir(parents=True, exist_ok=True)
 
-        # Key bindings: Shift+Enter inserts a newline.
+        # Key bindings: Option+Enter (macOS Alt+Enter) inserts a newline.
+        # Note: prompt_toolkit cannot distinguish Shift+Enter from Enter in most
+        # terminals, so we use Option/Alt+Enter instead.
         kb = KeyBindings()
 
-        @kb.add("s-enter")
-        def _shift_enter(event: object) -> None:  # type: ignore[misc]
-            """Shift+Enter inserts a newline."""
+        @kb.add("escape", "enter")
+        def _alt_enter(event: object) -> None:  # type: ignore[misc]
+            """Option+Enter / Alt+Enter inserts a newline."""
             event.current_buffer.insert_text("\n")  # type: ignore[attr-defined]
 
         prompt_session = PromptSession(
