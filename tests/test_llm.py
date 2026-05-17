@@ -312,3 +312,26 @@ class TestAgentWithFakeLLM:
 
         agent.chat("do something")
         assert session.token_usage["total"] == 150
+
+    def test_max_steps_sets_stop_reason(self, tmp_path):
+        """When the loop exhausts max_steps, expose stop reason and a user message."""
+        from mini_pi.agent import Agent, STOP_REASON_MAX_STEPS, format_max_steps_message
+        from mini_pi.config import Config
+        from mini_pi.session import Session
+
+        # Fake LLM always requests another tool — never returns final text.
+        tool_only = ChatResponse(
+            tool_calls=[
+                ToolCall(id="c1", name="bash", arguments='{"command":"echo hi"}'),
+            ],
+        )
+        fake = FakeLLM(default_response=tool_only)
+        # Use 2 (not the production default 99) so the test finishes in two rounds.
+        config = Config(api_key="test", session_dir=str(tmp_path), max_steps=2)
+        session = Session(tmp_path / "test.jsonl")
+        agent = Agent(config, session, llm=fake)
+
+        result = agent.chat("keep calling tools")
+        assert agent.last_stop_reason == STOP_REASON_MAX_STEPS
+        assert result == format_max_steps_message(2)
+        assert fake.call_count == 2

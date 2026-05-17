@@ -21,7 +21,7 @@ class Config:
     model: str = field(default_factory=lambda: os.getenv("MINI_PI_MODEL", "gpt-4o"))
 
     # Agent settings
-    max_steps: int = 20  # max tool call rounds per turn
+    max_steps: int = 99  # max tool call rounds per turn
     timeout: int = 30    # bash command timeout in seconds
 
     # Session

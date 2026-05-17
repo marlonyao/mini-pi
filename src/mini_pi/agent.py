@@ -37,6 +37,18 @@ from .token_estimator import TokenEstimator
 # Console for tool display — writes directly to real terminal (bypasses stream capture)
 _tool_console = Console(file=sys.__stdout__ or sys.stdout, soft_wrap=True)
 
+STOP_REASON_MAX_STEPS = "max_steps"
+
+
+def format_max_steps_message(max_steps: int) -> str:
+    """User-visible message when the agent loop hits Config.max_steps."""
+    return (
+        f"Reached the maximum number of tool-call rounds ({max_steps}) "
+        "without a final text response.\n\n"
+        "The session was saved — send another message to continue, "
+        "or increase `max_steps` in config."
+    )
+
 
 class Agent:
     """The coding agent: orchestrates LLM calls and tool execution."""
@@ -113,17 +125,24 @@ class Agent:
         # Track step for compaction cooldown
         self._last_compaction_step: int = -100
         self._current_step: int = 0
+        self._last_stop_reason: str | None = None
 
         # Emit startup event
         self.extension_manager.emit("on_start", EventContext(
             event="on_start", agent=self,
         ))
 
+    @property
+    def last_stop_reason(self) -> str | None:
+        """Why the most recent chat() ended: None, or STOP_REASON_MAX_STEPS."""
+        return self._last_stop_reason
+
     def chat(self, user_message: str) -> str:
         """
         Process a user message through the agent loop.
         Returns the final assistant text response.
         """
+        self._last_stop_reason = None
         self.session.add_user(user_message)
         return self._agent_loop()
 
@@ -284,8 +303,9 @@ class Agent:
                 self.session.save()
                 return response.content
 
+        self._last_stop_reason = STOP_REASON_MAX_STEPS
         self.session.save()
-        return "(agent reached max tool call steps without producing a final response)"
+        return format_max_steps_message(self.config.max_steps)
 
     def _on_text(self, text: str) -> None:
         """Callback: print text as it streams in."""

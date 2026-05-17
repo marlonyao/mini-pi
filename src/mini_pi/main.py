@@ -20,7 +20,7 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 
-from .agent import Agent
+from .agent import Agent, STOP_REASON_MAX_STEPS
 from .config import Config
 from .llm import OpenAILLM
 from .session import Session, create_session, fork_session, list_sessions
@@ -147,7 +147,7 @@ def main() -> None:
     # One-shot mode
     if args.query:
         response = agent.chat(args.query)
-        console.print(Panel(Markdown(response), title="🤖 Assistant", border_style="green"))
+        _print_chat_result(agent, response)
         return
 
     # Interactive REPL
@@ -204,8 +204,8 @@ def _repl(agent: Agent, config: Config) -> None:
         history_file.parent.mkdir(parents=True, exist_ok=True)
 
         # Key bindings for multiline input:
-        #   Enter         → submit (unless line ends with \)
-        #   Option+Enter  → insert newline
+        #   Enter       → submit (unless line ends with \)
+        #   Alt+Enter   → insert newline (macOS: set Option as Meta/Esc+ in terminal settings)
         kb = KeyBindings()
 
         @kb.add("enter")
@@ -219,7 +219,7 @@ def _repl(agent: Agent, config: Config) -> None:
 
         @kb.add("escape", "enter")
         def _alt_enter(event: object) -> None:  # type: ignore[misc]
-            """Option+Enter / Alt+Enter inserts a newline."""
+            """Alt+Enter (or Option+Enter with Meta enabled) inserts a newline."""
             event.current_buffer.insert_text("\n")  # type: ignore[attr-defined]
 
         prompt_session = PromptSession(
@@ -643,6 +643,31 @@ def _handle_models_list(config: Config) -> None:
     console.print("[dim]Use /model <provider/model> to switch[/dim]")
 
 
+def _print_chat_result(agent: Agent, response: str, *, streamed: bool = False) -> None:
+    """Show the final chat outcome (normal answer, max-steps stop, or empty)."""
+    if agent.last_stop_reason == STOP_REASON_MAX_STEPS:
+        console.print(
+            Panel(
+                response,
+                title="⚠ Stopped (max tool-call rounds)",
+                border_style="yellow",
+            )
+        )
+        return
+
+    if not response.strip():
+        console.print(
+            "[yellow]⚠ Assistant finished with no text response. "
+            "Send another message to continue.[/yellow]"
+        )
+        return
+
+    if streamed:
+        return
+
+    console.print(Panel(Markdown(response), title="🤖 Assistant", border_style="green"))
+
+
 def _run_streaming(agent: Agent, user_message: str) -> None:
     """Run agent with a streaming display + background steering thread.
 
@@ -720,15 +745,17 @@ def _run_streaming(agent: Agent, user_message: str) -> None:
     reader_thread = threading.Thread(target=_stdin_reader, daemon=True)
     reader_thread.start()
 
+    response = ""
     try:
         sys.stdout = StreamCapture(old_stdout, display)  # type: ignore
-        agent.chat(user_message)
+        response = agent.chat(user_message)
     finally:
         stop_event.set()
         # Wait for the reader thread to actually exit (it polls every 0.3s)
         reader_thread.join(timeout=1.0)
         sys.stdout = old_stdout
         display.stop()
+        _print_chat_result(agent, response, streamed=True)
         console.print()
 
 
