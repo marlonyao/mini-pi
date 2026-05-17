@@ -2,9 +2,12 @@
 Token estimation for mini-pi.
 
 Provides token counting to detect when context approaches the model's limit.
-Supports two strategies:
-1. tiktoken (accurate, optional dependency)
-2. Character-based heuristic (always available, ~80% accurate)
+The trigger condition is Pi-aligned:
+
+    contextTokens > contextWindow - reserveTokens
+
+This is an absolute value check, not a ratio. It ensures there's always
+enough room for the LLM's response.
 """
 
 from __future__ import annotations
@@ -52,7 +55,10 @@ def _is_cjk(char: str) -> bool:
 
 
 def _extract_message_texts(msg: dict[str, Any]) -> list[str]:
-    """Extract all text content from a message dict."""
+    """Extract all text content from a message dict.
+
+    Shared with Compactor to ensure identical token estimation.
+    """
     texts: list[str] = []
 
     content = msg.get("content")
@@ -76,8 +82,12 @@ class TokenEstimator:
     """
     Estimates token usage for messages against a context window.
 
+    Pi-aligned trigger:
+        should_compact() returns True when:
+            estimated_tokens > max_context_tokens - reserve_tokens
+
     Usage:
-        estimator = TokenEstimator(max_context_tokens=128000)
+        estimator = TokenEstimator(max_context_tokens=128000, reserve_tokens=16384)
         if estimator.should_compact(messages):
             # trigger compaction
     """
@@ -85,9 +95,11 @@ class TokenEstimator:
     def __init__(
         self,
         max_context_tokens: int = 128000,
+        reserve_tokens: int = 16384,
         strategy: str = "char",
     ):
         self.max_context_tokens = max_context_tokens
+        self.reserve_tokens = reserve_tokens
         self.strategy = strategy
 
     def estimate(self, text: str | None) -> int:
@@ -110,10 +122,12 @@ class TokenEstimator:
             return 0.0
         return self.estimate_messages(messages) / self.max_context_tokens
 
-    def should_compact(
-        self,
-        messages: list[dict[str, Any]],
-        threshold: float = 0.8,
-    ) -> bool:
-        """Check if messages exceed the compaction threshold."""
-        return self.usage_ratio(messages) >= threshold
+    def should_compact(self, messages: list[dict[str, Any]]) -> bool:
+        """Check if context exceeds the compaction threshold.
+
+        Pi-aligned: triggers when estimated tokens exceed the context
+        window minus the reserve. This is an absolute value check,
+        not a ratio.
+        """
+        threshold = self.max_context_tokens - self.reserve_tokens
+        return self.estimate_messages(messages) > threshold

@@ -350,11 +350,11 @@ def _handle_compact(agent: Agent, user_input: str) -> None:
     count = len(messages)
     console.print(f"[dim]Compacting {count} messages (context usage: {ratio:.0%})...[/dim]")
 
-    existing_summary = getattr(agent.session, "_last_compaction_summary", "")
     result = agent.compactor.compact(
         messages,
-        existing_summary=existing_summary,
         instructions=instructions,
+        prev_read_files=agent.session.last_read_files,
+        prev_modified_files=agent.session.last_modified_files,
     )
     if result.success:
         agent.session.record_compaction(result)
@@ -505,9 +505,9 @@ def _replay_history(messages: list[dict], max_messages: int = 10) -> None:
         content = msg.get("content", "") or ""
         tool_calls = msg.get("tool_calls")
 
-        if role == "system" and "[Compaction Summary]" in content:
+        if role == "system" and "conversation summary" in content.lower():
             # Show compaction summary
-            preview = content.replace("[Compaction Summary]", "").strip()
+            preview = content.replace("[Previous conversation summary]", "").replace("[End of summary. Continue from here.]", "").strip()
             preview = preview.replace("\n", " ")[:100]
             console.print(f"  [dim]📋 Summary: {preview}...[/dim]")
             continue
@@ -544,7 +544,7 @@ def _print_session_summary(session: Session) -> None:
         return
 
     # Show compaction status
-    compaction_count = getattr(session, "_compaction_count", 0)
+    compaction_count = session.compaction_count
     if compaction_count:
         console.print(f"  [dim](compacted {compaction_count} time(s))[/dim]")
 
@@ -673,8 +673,11 @@ def _run_streaming(agent: Agent, user_message: str) -> None:
             return len(text) if text else 0
 
         def flush(self):
-            self.display.flush()
-            self.fallback.flush()
+            try:
+                self.display.flush()
+                self.fallback.flush()
+            except BlockingIOError:
+                pass
 
         def isatty(self) -> bool:
             return False

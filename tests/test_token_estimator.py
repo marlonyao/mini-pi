@@ -102,12 +102,35 @@ class TestEstimateWithContextLimit:
         assert 0.0 <= ratio <= 1.0
 
     def test_should_compact_below_threshold(self):
-        estimator = TokenEstimator(max_context_tokens=10000)
+        """Pi-aligned: triggers when tokens > max - reserve."""
+        estimator = TokenEstimator(max_context_tokens=100000, reserve_tokens=16384)
         messages = [{"role": "user", "content": "short"}]
-        assert estimator.should_compact(messages, threshold=0.8) is False
+        # 100000 - 16384 = 83616 threshold
+        # ~6 tokens, way below
+        assert estimator.should_compact(messages) is False
 
     def test_should_compact_above_threshold(self):
-        estimator = TokenEstimator(max_context_tokens=1000)
-        # Create a very long message
-        messages = [{"role": "user", "content": "a" * 5000}]
-        assert estimator.should_compact(messages, threshold=0.5) is True
+        """Pi-aligned: triggers when tokens > max - reserve."""
+        estimator = TokenEstimator(max_context_tokens=10000, reserve_tokens=1000)
+        # Create messages that exceed 10000 - 1000 = 9000 tokens
+        messages = [{"role": "user", "content": "a" * 40000}]
+        assert estimator.should_compact(messages) is True
+
+    def test_should_compact_exactly_at_threshold(self):
+        estimator = TokenEstimator(max_context_tokens=10000, reserve_tokens=16384)
+        messages = [{"role": "user", "content": "a" * 40000}]
+        # 10000 - 16384 < 0, always False since tokens can't be negative
+        # Actually tokens > negative number is always True for positive tokens
+        # This test verifies the behavior is sensible
+        result = estimator.should_compact(messages)
+        # If reserve > max, threshold is negative, any message triggers
+        assert result is True
+
+    def test_should_compact_no_reserve(self):
+        estimator = TokenEstimator(max_context_tokens=100, reserve_tokens=0)
+        messages = [{"role": "user", "content": "a" * 500}]
+        assert estimator.should_compact(messages) is True
+
+    def test_default_reserve_tokens(self):
+        estimator = TokenEstimator()
+        assert estimator.reserve_tokens == 16384

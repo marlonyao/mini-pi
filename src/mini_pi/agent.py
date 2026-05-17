@@ -107,7 +107,12 @@ class Agent:
 
         self.token_estimator = TokenEstimator(
             max_context_tokens=config.compaction.max_context_tokens,
+            reserve_tokens=config.compaction.reserve_tokens,
         )
+
+        # Track step for compaction cooldown
+        self._last_compaction_step: int = -100
+        self._current_step: int = 0
 
         # Emit startup event
         self.extension_manager.emit("on_start", EventContext(
@@ -162,11 +167,14 @@ class Agent:
     def _agent_loop(self) -> str:
         """Run the agent loop until a final text response is produced."""
         for step in range(self.config.max_steps):
+            self._current_step = step
+
             # Consume any steering messages injected mid-execution
             while self._steering_messages:
                 msg = self._steering_messages.pop(0)
                 self.session.add_user(msg)
                 print(f"\n  📣 Steering: {msg[:80]}{'...' if len(msg) > 80 else ''}")
+
             # Auto-compaction: check if context is approaching limit
             self._maybe_compact()
 
@@ -399,36 +407,57 @@ class Agent:
         return ", ".join(parts)
 
     def _maybe_compact(self) -> None:
-        """Check if context needs compaction and run it if so."""
+        """Check if context needs compaction and run it if so.
+
+        Pi-aligned strategy:
+        - Trigger: contextTokens > contextWindow - reserveTokens
+        - Keep: walk backwards with keepRecentTokens budget
+        - No "summary of summary" — always summarize from raw messages
+        - Cooldown: skip if compacted within last 4 steps
+        """
         config = self.config.compaction
         if not config.enabled:
             return
 
+        # Cooldown guard: if we just compacted and context is below
+        # threshold, no need to re-check for a few steps
+        steps_since_last = self._current_step - self._last_compaction_step
+        if 0 < steps_since_last < 4:
+            # Skip: we just compacted, give the agent a few steps before re-checking
+            return
+
         messages = self.session.get_openai_messages()
-        if self.token_estimator.should_compact(messages, threshold=config.threshold):
-            # Extension hook: on_before_compact
-            self.extension_manager.emit("on_before_compact", EventContext(
-                event="on_before_compact", agent=self,
-                messages=messages,
-            ))
+        if not self.token_estimator.should_compact(messages):
+            return
 
-            print("\n  🧹 Auto-compacting conversation...")
+        # Extension hook: on_before_compact
+        self.extension_manager.emit("on_before_compact", EventContext(
+            event="on_before_compact", agent=self,
+            messages=messages,
+        ))
 
-            # Support incremental update if we have a previous summary
-            existing_summary = getattr(self.session, "_last_compaction_summary", "")
+        print("\n  🧹 Auto-compacting conversation...")
 
-            result = self.compactor.compact(
-                messages,
-                existing_summary=existing_summary,
+        # Pass cumulative file tracking from previous compaction
+        result = self.compactor.compact(
+            messages,
+            prev_read_files=self.session.last_read_files,
+            prev_modified_files=self.session.last_modified_files,
+        )
+
+        if result.success:
+            self.session.record_compaction(result)
+            self._last_compaction_step = self._current_step
+            print(
+                f"     Compacted {result.tokens_before} → "
+                f"{result.compacted_count} messages kept "
+                f"({len(result.read_files)} read, {len(result.modified_files)} modified files tracked)"
             )
-            if result.success:
-                self.session.record_compaction(result)
-                print(f"     Compacted {result.original_count} → {result.compacted_count} messages")
-            else:
-                print(f"     Compaction skipped: {result.error}")
+        else:
+            print(f"     Compaction skipped: {result.error}")
 
-            # Extension hook: on_after_compact
-            self.extension_manager.emit("on_after_compact", EventContext(
-                event="on_after_compact", agent=self,
-                compaction_result=result,
-            ))
+        # Extension hook: on_after_compact
+        self.extension_manager.emit("on_after_compact", EventContext(
+            event="on_after_compact", agent=self,
+            compaction_result=result,
+        ))

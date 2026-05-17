@@ -1,9 +1,9 @@
 """
-Tests for append-only session storage (P1-1).
+Tests for append-only session storage (Pi-aligned compaction).
 
 Key invariant: JSONL files are never overwritten. New messages are always
-appended. Compaction creates snapshots that reference the compacted state
-without deleting the original messages on disk.
+appended. Compaction creates CompactionEntry that stores first_kept_index,
+summary, and file tracking — without deleting any original messages on disk.
 """
 
 import json
@@ -68,7 +68,7 @@ class TestAppendOnlyBasic:
 
 
 class TestAppendOnlyCompaction:
-    """Append-only behavior during compaction."""
+    """Append-only behavior during compaction (CompactionEntry)."""
 
     def test_compaction_preserves_history_on_disk(self, tmp_path):
         """After compaction, the original messages should still be on disk."""
@@ -85,15 +85,17 @@ class TestAppendOnlyCompaction:
         assert "message 0" in raw_before
         assert "message 9" in raw_before
 
-        # Simulate compaction
+        # Simulate compaction with new CompactResult
         from mini_pi.compactor import CompactResult
         result = CompactResult(
             success=True,
-            summary="Summary of messages 0-6",
+            summary="## Goal\nSummary of messages 0-6",
             original_count=20,
-            compacted_count=6,
+            compacted_count=8,
+            first_kept_index=16,  # keep last 4 messages (indices 16-19)
+            tokens_before=5000,
         )
-        result._recent_messages = s.messages[-3:]  # keep last 3
+        result._recent_messages = s.messages[16:]  # keep last 4
         s.record_compaction(result)
 
         # Read raw file content after compaction
@@ -103,10 +105,10 @@ class TestAppendOnlyCompaction:
         assert "message 0" in raw_after
         assert "message 9" in raw_after
 
-        # But in-memory messages are compacted
-        assert len(s.messages) == 4  # 1 summary + 3 recent
+        # In-memory messages are trimmed to kept portion
+        assert len(s.messages) == 4
 
-    def test_compaction_creates_snapshot_entry(self, tmp_path):
+    def test_compaction_creates_compaction_entry(self, tmp_path):
         s = create_session(str(tmp_path), name="test")
         s.add_user("hello")
         s.add_assistant("hi")
@@ -115,26 +117,33 @@ class TestAppendOnlyCompaction:
         from mini_pi.compactor import CompactResult
         result = CompactResult(
             success=True,
-            summary="Summary text",
+            summary="## Goal\nSummary text",
             original_count=2,
             compacted_count=1,
+            first_kept_index=1,
+            tokens_before=100,
+            read_files=["foo.py"],
+            modified_files=["bar.py"],
         )
-        result._recent_messages = [s.messages[-1]]
+        result._recent_messages = [s.messages[1]]
         s.record_compaction(result)
 
-        # Check that a snapshot entry exists in the file
+        # Check that a compaction entry exists in the file
         raw = s.path.read_text()
-        found_snapshot = False
+        found_compaction = False
         for line in raw.splitlines():
             entry = json.loads(line)
-            if entry.get("type") == "snapshot":
-                found_snapshot = True
+            if entry.get("type") == "compaction":
+                found_compaction = True
                 assert "Summary text" in entry.get("summary", "")
-                assert len(entry.get("messages", [])) == 2  # summary msg + recent
-        assert found_snapshot
+                assert entry.get("first_kept_index") == 1
+                assert entry.get("tokens_before") == 100
+                assert "foo.py" in entry.get("read_files", [])
+                assert "bar.py" in entry.get("modified_files", [])
+        assert found_compaction
 
     def test_multiple_compactions(self, tmp_path):
-        """Multiple compactions should all append snapshots."""
+        """Multiple compactions should all append entries."""
         s = create_session(str(tmp_path), name="test")
 
         # First round of messages + compaction
@@ -143,8 +152,15 @@ class TestAppendOnlyCompaction:
         s.save()
 
         from mini_pi.compactor import CompactResult
-        r1 = CompactResult(success=True, summary="Summary 1", original_count=5, compacted_count=1)
-        r1._recent_messages = []
+        r1 = CompactResult(
+            success=True,
+            summary="## Goal\nSummary 1",
+            original_count=5,
+            compacted_count=1,
+            first_kept_index=3,
+            tokens_before=1000,
+        )
+        r1._recent_messages = s.messages[3:]
         s.record_compaction(r1)
 
         # Second round of messages + compaction
@@ -152,19 +168,26 @@ class TestAppendOnlyCompaction:
             s.add_user(f"msg2-{i}")
         s.save()
 
-        r2 = CompactResult(success=True, summary="Summary 2", original_count=5, compacted_count=1)
-        r2._recent_messages = []
+        r2 = CompactResult(
+            success=True,
+            summary="## Goal\nSummary 2",
+            original_count=8,
+            compacted_count=1,
+            first_kept_index=3,
+            tokens_before=2000,
+        )
+        r2._recent_messages = s.messages[3:]
         s.record_compaction(r2)
 
-        # Count snapshots in file
+        # Count compaction entries in file
         raw = s.path.read_text()
-        snapshots = [json.loads(l) for l in raw.splitlines() if l.strip()]
-        snapshot_count = sum(1 for e in snapshots if e.get("type") == "snapshot")
-        assert snapshot_count == 2
+        entries = [json.loads(l) for l in raw.splitlines() if l.strip()]
+        compaction_count = sum(1 for e in entries if e.get("type") == "compaction")
+        assert compaction_count == 2
 
 
 class TestAppendOnlyReload:
-    """Loading from append-only files."""
+    """Loading from append-only files with CompactionEntry."""
 
     def test_reload_after_multiple_saves(self, tmp_path):
         s = create_session(str(tmp_path), name="test")
@@ -179,6 +202,7 @@ class TestAppendOnlyReload:
         assert len(loaded.messages) == 3
 
     def test_reload_after_compaction(self, tmp_path):
+        """Reload should only load messages from first_kept_index onward."""
         s = create_session(str(tmp_path), name="test")
         for i in range(10):
             s.add_user(f"msg {i}")
@@ -187,18 +211,21 @@ class TestAppendOnlyReload:
         from mini_pi.compactor import CompactResult
         result = CompactResult(
             success=True,
-            summary="Compact summary",
+            summary="## Goal\nCompact summary",
             original_count=10,
             compacted_count=3,
+            first_kept_index=8,
+            tokens_before=5000,
         )
-        result._recent_messages = s.messages[-2:]
+        result._recent_messages = s.messages[8:]
         s.record_compaction(result)
 
-        # Reload — should get snapshot messages + any appended after
+        # Reload — should only have messages from first_kept_index onward
         loaded = Session(s.path)
-        # snapshot has: summary msg + 2 recent = 3 messages
-        assert len(loaded.messages) == 3
-        assert "Compaction Summary" in loaded.messages[0]["content"]
+        assert len(loaded.messages) == 2  # messages 8 and 9
+        assert loaded.messages[0]["content"] == "msg 8"
+        assert loaded.messages[1]["content"] == "msg 9"
+        assert "Compact summary" in loaded.last_compaction_summary
 
     def test_reload_then_append(self, tmp_path):
         """Reload a compacted session and add more messages."""
@@ -210,11 +237,13 @@ class TestAppendOnlyReload:
         from mini_pi.compactor import CompactResult
         result = CompactResult(
             success=True,
-            summary="Summary",
+            summary="## Goal\nSummary",
             original_count=10,
             compacted_count=2,
+            first_kept_index=9,
+            tokens_before=3000,
         )
-        result._recent_messages = [s.messages[-1]]
+        result._recent_messages = [s.messages[9]]
         s.record_compaction(result)
 
         # Simulate: reload in a new session, add more messages
@@ -224,9 +253,37 @@ class TestAppendOnlyReload:
 
         # Reload again and verify
         final = Session(s.path)
-        # snapshot (summary + 1 recent) + 1 new
-        assert len(final.messages) == 3
-        assert final.messages[-1]["content"] == "post-compaction message"
+        # Compaction kept msg 9, then added 1 more = 2 messages
+        assert len(final.messages) == 2
+        assert final.messages[0]["content"] == "msg 9"
+        assert final.messages[1]["content"] == "post-compaction message"
+
+    def test_reload_injects_summary_in_openai_messages(self, tmp_path):
+        """get_openai_messages() should prepend the compaction summary."""
+        s = create_session(str(tmp_path), name="test")
+        s.add_user("hello")
+        s.save()
+
+        from mini_pi.compactor import CompactResult
+        result = CompactResult(
+            success=True,
+            summary="## Goal\nPrevious context",
+            original_count=1,
+            compacted_count=1,
+            first_kept_index=1,
+            tokens_before=100,
+        )
+        result._recent_messages = []
+        s.record_compaction(result)
+
+        # Reload
+        loaded = Session(s.path)
+        msgs = loaded.get_openai_messages()
+
+        # Should have summary injection + 0 kept messages
+        assert len(msgs) == 1
+        assert msgs[0]["role"] == "system"
+        assert "Previous context" in msgs[0]["content"]
 
     def test_original_data_survives_reload(self, tmp_path):
         """Full history should be on disk even after compaction + reload."""
@@ -237,9 +294,11 @@ class TestAppendOnlyReload:
         from mini_pi.compactor import CompactResult
         result = CompactResult(
             success=True,
-            summary="Compacted",
+            summary="## Goal\nCompacted",
             original_count=1,
-            compacted_count=1,
+            compacted_count=0,
+            first_kept_index=1,
+            tokens_before=50,
         )
         result._recent_messages = []
         s.record_compaction(result)
@@ -283,6 +342,21 @@ class TestAppendOnlyEdgeCases:
         loaded_fork = Session(s2.path)
         assert len(loaded_fork.messages) == 2
 
+    def test_fork_preserves_compaction_state(self, tmp_path):
+        s1 = create_session(str(tmp_path), name="source")
+        s1.add_user("hello")
+        s1._compaction_count = 3
+        s1._last_compaction_summary = "## Goal\nPrevious"
+        s1._last_read_files = ["foo.py"]
+        s1._last_modified_files = ["bar.py"]
+        s1.save()
+
+        s2 = fork_session(s1, str(tmp_path), name="fork")
+        assert s2.compaction_count == 3
+        assert "Previous" in s2.last_compaction_summary
+        assert "foo.py" in s2.last_read_files
+        assert "bar.py" in s2.last_modified_files
+
     def test_token_usage_survives_reload(self, tmp_path):
         s = create_session(str(tmp_path), name="test")
         s.add_user("hello")
@@ -291,7 +365,6 @@ class TestAppendOnlyEdgeCases:
 
         loaded = Session(s.path)
         # Note: token_usage is not persisted in current design
-        # This test documents current behavior
         assert isinstance(loaded.token_usage, dict)
 
     def test_no_duplicate_messages_on_double_save(self, tmp_path):
@@ -303,3 +376,17 @@ class TestAppendOnlyEdgeCases:
 
         loaded = Session(s.path)
         assert len(loaded.messages) == 1
+
+    def test_list_sessions(self, tmp_path):
+        s1 = create_session(str(tmp_path), name="session1")
+        s1.add_user("hello")
+        s1.save()
+
+        s2 = create_session(str(tmp_path), name="session2")
+        s2.add_user("world")
+        s2.save()
+
+        sessions = list_sessions(str(tmp_path))
+        assert len(sessions) == 2
+        names = {s["name"] for s in sessions}
+        assert names == {"session1", "session2"}
