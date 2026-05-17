@@ -16,6 +16,11 @@ import json
 import sys
 from typing import Any
 
+from rich.console import Console
+from rich.panel import Panel
+from rich.syntax import Syntax
+from rich.text import Text
+
 from .compactor import Compactor, CompactionConfig
 from .config import Config
 from .context import prune_messages, PruningConfig
@@ -28,6 +33,9 @@ from .system_prompt import build_system_prompt
 from .templates import TemplateManager
 from .tools import execute_tool, get_openai_tools
 from .token_estimator import TokenEstimator
+
+# Console for tool display — writes directly to real terminal (bypasses stream capture)
+_tool_console = Console(file=sys.__stdout__ or sys.stdout, soft_wrap=True)
 
 
 class Agent:
@@ -211,7 +219,7 @@ class Agent:
                 # Execute each tool call
                 for tc in response.tool_calls:
                     args = json.loads(tc.arguments)
-                    print(f"\n  🔧 {tc.name}({self._format_args(args)})")
+                    self._display_tool_call(tc.name, args)
 
                     # Extension hook: on_before_tool_call
                     self.extension_manager.emit("on_before_tool_call", EventContext(
@@ -247,11 +255,7 @@ class Agent:
                         tool_result=result,
                     ))
 
-                    # Show brief result
-                    preview = result[:200].replace("\n", " ")
-                    if len(result) > 200:
-                        preview += "..."
-                    print(f"     → {preview}")
+                    self._display_tool_result(tc.name, result)
 
                     self.session.add_tool_result(tc.id, result)
 
@@ -288,6 +292,104 @@ class Agent:
     @staticmethod
     def _format_args(args: dict) -> str:
         """Format tool arguments for display."""
+        parts = []
+        for k, v in args.items():
+            v_str = str(v)
+            if len(v_str) > 60:
+                v_str = v_str[:57] + "..."
+            parts.append(f"{k}={v_str!r}")
+        return ", ".join(parts)
+
+    # ── Tool display (Rich) ──────────────────────────────────────────
+
+    def _display_tool_call(self, name: str, args: dict) -> None:
+        """Display a tool call header with Rich formatting (pi-style)."""
+        key_info = self._format_key_args(name, args)
+        _tool_console.print()
+        _tool_console.print(
+            f"  [bold bright_blue]⏺ {name}[/bold bright_blue]  [dim]{key_info}[/dim]",
+            highlight=False,
+        )
+
+    def _display_tool_result(self, name: str, result: str) -> None:
+        """Display a tool result with Rich formatting (pi-style)."""
+        is_error = result.strip().startswith("Error")
+        is_write = result.strip().startswith("✅")
+
+        # For write/edit success, show a compact one-liner
+        if is_write and "\n" not in result.strip():
+            _tool_console.print(f"  [green]{result.strip()}[/green]")
+            return
+
+        # Determine how much to show
+        lines = result.splitlines()
+        max_display = 30
+
+        if len(lines) <= max_display:
+            content = result
+        else:
+            content = "\n".join(lines[:max_display]) + f"\n  ... ({len(lines) - max_display} more lines)"
+
+        # Try syntax highlighting for code-like results
+        panel_content = self._make_result_content(name, content)
+
+        if is_error:
+            border_style = "red"
+        else:
+            border_style = "dim"
+
+        panel = Panel(
+            panel_content,
+            border_style=border_style,
+            padding=(0, 1),
+            expand=False,
+        )
+        _tool_console.print(panel)
+
+    @staticmethod
+    def _make_result_content(name: str, content: str) -> Text | Syntax | str:
+        """Create Rich renderable content for tool results."""
+        # Detect if content looks like code for syntax highlighting
+        code_extensions = {".py", " .js", ".ts", ".json", ".yaml", ".yml", ".toml", ".sh", ".rs", ".go"}
+        # For read results with code, try syntax highlighting
+        # (Simple heuristic: if content has typical code patterns)
+        if name == "bash" and any(
+            kw in content for kw in ["def ", "class ", "import ", "function ", "const "]
+        ):
+            try:
+                return Syntax(content, "python", theme="monokai", line_numbers=False)
+            except Exception:
+                pass
+        return content
+
+    @staticmethod
+    def _format_key_args(name: str, args: dict) -> str:
+        """Format key arguments for tool display based on tool type."""
+        if name == "bash":
+            cmd = args.get("command", "")
+            if len(cmd) > 100:
+                cmd = cmd[:97] + "..."
+            return cmd
+        elif name == "read":
+            parts = [args.get("path", "")]
+            if args.get("offset"):
+                parts.append(f"offset={args['offset']}")
+            if args.get("limit"):
+                parts.append(f"limit={args['limit']}")
+            return " ".join(str(p) for p in parts)
+        elif name == "write":
+            return args.get("path", "")
+        elif name == "edit":
+            return args.get("path", "")
+        elif name == "grep":
+            pattern = args.get("pattern", "")
+            path = args.get("path", ".")
+            return f"'{pattern}' in {path}"
+        elif name == "find":
+            return args.get("pattern", "")
+        elif name == "ls":
+            return args.get("path", ".")
+        # Generic fallback
         parts = []
         for k, v in args.items():
             v_str = str(v)

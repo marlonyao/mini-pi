@@ -92,10 +92,20 @@ class TestBash:
 
 class TestRead:
     def test_read_file(self, workdir):
+        """Read output is raw content without line numbers or header."""
         params = ReadParams(path="hello.py")
         result = tool_read(params, cwd=str(workdir))
         assert "print('hello')" in result
-        assert "3 lines" in result
+        # No line numbers or file header (pi-style)
+        assert " | " not in result
+        assert not result.startswith("File:")
+
+    def test_read_raw_content(self, workdir):
+        """Output should match the file content exactly."""
+        params = ReadParams(path="hello.py")
+        result = tool_read(params, cwd=str(workdir))
+        expected = "print('hello')\nname = 'world'\nprint(name)"
+        assert result.strip() == expected
 
     def test_read_with_offset(self, workdir):
         params = ReadParams(path="data.txt", offset=2, limit=2)

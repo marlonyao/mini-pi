@@ -641,13 +641,22 @@ def _run_streaming(agent: Agent, user_message: str) -> None:
         def isatty(self) -> bool:
             return False
 
-    # Background thread: read stdin for steering commands during execution
+    # Background thread: read stdin for steering commands during execution.
+    # Uses select() with short timeout so the thread can check stop_event
+    # frequently and exit promptly — avoiding a stale readline() that would
+    # compete with prompt_toolkit for stdin after the agent loop finishes.
+    import select as _select
+
     stop_event = threading.Event()
 
     def _stdin_reader():
         """Background thread that reads /steer commands from stdin."""
         while not stop_event.is_set():
             try:
+                # Poll stdin with 0.3s timeout so stop_event is checked frequently
+                ready, _, _ = _select.select([sys.stdin], [], [], 0.3)
+                if not ready:
+                    continue
                 line = sys.stdin.readline()
                 if not line:
                     break
@@ -675,6 +684,8 @@ def _run_streaming(agent: Agent, user_message: str) -> None:
         agent.chat(user_message)
     finally:
         stop_event.set()
+        # Wait for the reader thread to actually exit (it polls every 0.3s)
+        reader_thread.join(timeout=1.0)
         sys.stdout = old_stdout
         display.stop()
         console.print()

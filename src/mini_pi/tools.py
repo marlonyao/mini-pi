@@ -168,7 +168,7 @@ def tool_bash(params: BashParams, *, timeout: int = 30, cwd: str = "") -> str:
 
 
 def tool_read(params: ReadParams, *, cwd: str = "") -> str:
-    """Read file contents with head truncation and continuation hints."""
+    """Read file contents with truncation and continuation hints (pi-style)."""
     path = _resolve(params.path, cwd)
     try:
         if not path.exists():
@@ -196,38 +196,30 @@ def tool_read(params: ReadParams, *, cwd: str = "") -> str:
         # Apply truncation
         truncation = truncate_head(selected_text)
 
-        # Build output with line numbers
-        output_lines = truncation["content"].splitlines()
-        start_display = start + 1
-        numbered = []
-        for i, line in enumerate(output_lines):
-            line_num = start_display + i
-            numbered.append(f"{line_num:>6} | {line}")
-
-        header = f"File: {path} ({total_lines} lines)"
-        output_parts = [header, *numbered]
+        # Output raw content without line numbers (pi-style)
+        output_parts = [truncation["content"]]
 
         if truncation["truncated"]:
-            end_display = start_display + truncation["output_lines"] - 1
+            end_display = start + 1 + truncation["output_lines"] - 1
             if truncation["first_line_exceeds_limit"]:
                 output_parts.append(
-                    f"\n[Line {start_display} exceeds {format_size(DEFAULT_MAX_BYTES)} limit. "
-                    f"Use bash: sed -n '{start_display}p' {params.path} | head -c {DEFAULT_MAX_BYTES}]"
+                    f"[Line {start + 1} exceeds {format_size(DEFAULT_MAX_BYTES)} limit. "
+                    f"Use bash: sed -n '{start + 1}p' {params.path} | head -c {DEFAULT_MAX_BYTES}]"
                 )
             else:
                 next_offset = end_display + 1
                 output_parts.append(
-                    f"\n[Showing lines {start_display}-{end_display} of {total_lines}. "
-                    f"Use offset={next_offset} to continue.]"
+                    f"[Output truncated to {DEFAULT_MAX_LINES} lines or {format_size(DEFAULT_MAX_BYTES)}. "
+                    f"Use offset={next_offset} to continue reading the remaining lines.]"
                 )
         elif params.limit is not None and start + params.limit < total_lines:
             remaining = total_lines - (start + params.limit)
             next_offset = start + params.limit + 1
             output_parts.append(
-                f"\n[{remaining} more lines in file. Use offset={next_offset} to continue.]"
+                f"[{remaining} more lines in file. Use offset={next_offset} to continue.]"
             )
 
-        return "\n".join(output_parts)
+        return "\n\n".join(output_parts)
 
     except Exception as e:
         return f"Error reading file: {e}"
