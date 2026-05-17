@@ -211,26 +211,23 @@ def _repl(agent: Agent, config: Config) -> None:
             """Shift+Enter inserts a newline."""
             event.current_buffer.insert_text("\n")  # type: ignore[attr-defined]
 
-        def _is_complete(buffer: object) -> bool:  # type: ignore[type-arg]
-            """Enter submits unless the current line ends with a backslash.
-
-            - `\\` + Enter → insert newline (continuation)
-            - Otherwise     → submit
-            """
-            text = buffer.text  # type: ignore[attr-defined]
-            if not text:
-                return True
-            stripped = text.rstrip()
-            return not stripped.endswith("\\")
-
         prompt_session = PromptSession(
             history=FileHistory(str(history_file)),
             multiline=True,
-            is_complete=_is_complete,
             key_bindings=kb,
             prompt_continuation=".. > ",
         )
-        prompt_func = lambda: prompt_session.prompt("You > ")
+
+        def _is_complete(document: object) -> bool:  # type: ignore[type-arg]
+            """Enter submits unless the current line ends with a backslash."""
+            text = document.text  # type: ignore[attr-defined]
+            if not text:
+                return True
+            return not text.rstrip().endswith("\\")
+
+        prompt_func = lambda: prompt_session.prompt(
+            "You > ", is_complete=_is_complete,
+        )
     except ImportError:
         prompt_func = lambda: _multiline_input("You > ")
 
