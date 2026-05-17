@@ -203,10 +203,19 @@ def _repl(agent: Agent, config: Config) -> None:
         history_file = Path(config.session_dir) / ".repl_history"
         history_file.parent.mkdir(parents=True, exist_ok=True)
 
-        # Key bindings: Option+Enter (macOS Alt+Enter) inserts a newline.
-        # Note: prompt_toolkit cannot distinguish Shift+Enter from Enter in most
-        # terminals, so we use Option/Alt+Enter instead.
+        # Key bindings for multiline input:
+        #   Enter         → submit (unless line ends with \)
+        #   Option+Enter  → insert newline
         kb = KeyBindings()
+
+        @kb.add("enter")
+        def _enter(event: object) -> None:  # type: ignore[misc]
+            buf = event.current_buffer  # type: ignore[attr-defined]
+            # If current line ends with backslash, insert newline (continuation)
+            if buf.document.current_line.rstrip().endswith("\\"):
+                buf.insert_text("\n")
+            else:
+                buf.validate_and_handle_enter()
 
         @kb.add("escape", "enter")
         def _alt_enter(event: object) -> None:  # type: ignore[misc]
@@ -219,17 +228,7 @@ def _repl(agent: Agent, config: Config) -> None:
             key_bindings=kb,
             prompt_continuation=".. > ",
         )
-
-        def _is_complete(document: object) -> bool:  # type: ignore[type-arg]
-            """Enter submits unless the current line ends with a backslash."""
-            text = document.text  # type: ignore[attr-defined]
-            if not text:
-                return True
-            return not text.rstrip().endswith("\\")
-
-        prompt_func = lambda: prompt_session.prompt(
-            "You > ", is_complete=_is_complete,
-        )
+        prompt_func = lambda: prompt_session.prompt("You > ")
     except ImportError:
         prompt_func = lambda: _multiline_input("You > ")
 
